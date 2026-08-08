@@ -1,0 +1,3559 @@
+'use strict';
+require('dotenv').config();
+// index.js — Mie Backend v4.0
+// Cloud Run + Firestore (KMS) + Google Sheets + Calendar/Gmail Watch
+// =============================================================================
+//
+// ┌─────────────────────────────────────────────────────────────────┐
+// │  v4.0 포함 내용 요약                                              │
+// ├─────────────────────────────────────────────────────────────────┤
+// │                                                                 │
+// │  [기반] v3.8 전체 코드 (2066줄) 완전 포함                          │
+// │                                                                 │
+// │  [v3.4 → v4.0 복구 / 개선]                                       │
+// │  1. SCOPES: userinfo.profile 복구 → given_name 사용 가능           │
+// │  2. /api/me/status: given_name 응답 포함                          │
+// │  3. /api/me/calendars: summaryOriginal, accessRole, selected 추가 │
+// │  4. res.redirect(FRONTEND_URL') 따옴표 버그 수정                   │
+// │                                                                 │
+// │  [v3.8 시트 컬럼 불일치 수정]                                       │
+// │  5.  HEALTH_TAB_MAP: health→Body, custom→T-Custom               │
+// │  6.  buildHealthRow_ health(Body): custom_item_name/value/unit 추가 (27col) │
+// │  7.  buildHealthRow_ activity: add_to_calendar 추가              │
+// │  8.  buildHealthRow_ sleep: add_to_calendar 추가                 │
+// │  9.  buildHealthRow_ mood: energy_level_1to5, add_to_calendar    │
+// │  10. buildHealthRow_ baseline: dob 추가 (17col)                  │
+// │  11. parseHealthRows_ health(Body): col 수정 (27col)             │
+// │  12. parseHealthRows_ sleep: add_to_calendar col 추가            │
+// │  13. parseHealthRows_ mood: energy_level_1to5, add_to_calendar   │
+// │  14. parseHealthBaseline_: dob col 추가                          │
+// │                                                                 │
+// │  [신규 탭 추가]                                                    │
+// │  15. HEALTH_TAB_MAP + buildHealthRow_ + parseHealthRows_:        │
+// │      water       → T-Water (8col)                               │
+// │      medication  → T-Medication (케이스B: 복약체크 update)          │
+// │      womens      → Women (33col)                                │
+// │      womens_bp   → Women_BP                                     │
+// │      womens_mood → Women_Mood                                   │
+// │      fetal_movement / baby_kick → Pregnancy (entry_type 구분)    │
+// │                                                                 │
+// │  [신규 엔드포인트]                                                  │
+// │  16. POST /api/me/health/profile (PUT과 동일, panel-infogoal용)   │
+// │  17. GET    /api/me/health/records?type=X                        │
+// │  18. POST   /api/me/health/records                               │
+// │  19. PUT    /api/me/health/records/:id                           │
+// │  20. DELETE /api/me/health/records/:id                           │
+// │      Records 시트: record_id | record_type | data_json |         │
+// │                    created_at | updated_at                       │
+// │                                                                 │
+// │  [전체 라우트 목록]                                                 │
+// │  GET  /                                                          │
+// │  GET  /auth/google                                               │
+// │  GET  /auth/google/callback                                      │
+// │  POST /auth/logout                                               │
+// │  GET  /api/me/status                                             │
+// │  GET  /api/me/calendars                                          │
+// │  GET  /api/me/events                                             │
+// │  POST /api/me/events/create                                      │
+// │  POST /api/me/events/update                                      │
+// │  POST /api/me/events/delete                                      │
+// │  GET  /api/me/tasks                                              │
+// │  POST /api/me/tasks/create                                       │
+// │  POST /api/me/tasks/update                                       │
+// │  POST /api/me/tasks/lists/create                                 │
+// │  POST /api/me/message                                            │
+// │  POST /api/me/access-token                                       │
+// │  POST /api/pubsub/gmail-push                                     │
+// │  POST /api/pubsub/calendar-push                                  │
+// │  GET  /api/calendar/watch                                        │
+// │  GET  /api/calendar/watch/status                                 │
+// │  GET  /api/calendar/watch/renew-all                              │
+// │  GET  /api/gmail/watch                                           │
+// │  GET  /api/gmail/watch/status                                    │
+// │  GET  /api/me/finance                                            │
+// │  PUT  /api/me/finance/baseline                                   │
+// │  PUT  /api/me/finance/baseline/bulk                              │
+// │  POST /api/me/finance/transaction                                │
+// │  POST /api/me/finance/transaction/edit                           │
+// │  POST /api/me/finance/transaction/delete                         │
+// │  GET  /api/me/health/profile                                     │
+// │  PUT  /api/me/health/profile                                     │
+// │  POST /api/me/health/profile  (신규 — PUT과 동일)                  │
+// │  GET  /api/me/health                                             │
+// │  POST /api/me/health/log                                         │
+// │  POST /api/me/health/log/edit                                    │
+// │  POST /api/me/health/log/delete                                  │
+// │  GET  /api/me/health/records                                     │
+// │  POST /api/me/health/records                                     │
+// │  PUT  /api/me/health/records/:id                                 │
+// │  DELETE /api/me/health/records/:id                               │
+// │  POST /api/health/food/search                                    │
+// └─────────────────────────────────────────────────────────────────┘
+
+const express    = require('express');
+const session    = require('cookie-session');
+const cors       = require('cors');
+const bodyParser = require('body-parser');
+const { google } = require('googleapis');
+
+// ================== FIRESTORE INIT ==================
+const admin = require('firebase-admin');
+if (!admin.apps.length) { admin.initializeApp(); }
+const db = admin.firestore();
+db.settings({ ignoreUndefinedProperties: true });
+
+const REFRESH_TOKEN_COLLECTION = 'oauth_refresh_tokens';
+
+// ================== KMS INIT ==================
+const { KeyManagementServiceClient } = require('@google-cloud/kms');
+const kmsClient    = new KeyManagementServiceClient();
+const KMS_KEY_NAME = process.env.KMS_KEY_NAME || '';
+
+async function kmsEncrypt_(plaintext) {
+  if (!KMS_KEY_NAME) return null;
+  const [result] = await kmsClient.encrypt({
+    name: KMS_KEY_NAME, plaintext: Buffer.from(String(plaintext), 'utf8'),
+  });
+  return result.ciphertext ? Buffer.from(result.ciphertext).toString('base64') : null;
+}
+
+async function kmsDecrypt_(ciphertextB64) {
+  if (!KMS_KEY_NAME) return null;
+  const [result] = await kmsClient.decrypt({
+    name: KMS_KEY_NAME, ciphertext: Buffer.from(String(ciphertextB64), 'base64'),
+  });
+  return result.plaintext ? Buffer.from(result.plaintext).toString('utf8') : null;
+}
+
+async function saveRefreshTokenForEmail(email, refreshToken) {
+  const safeEmail = String(email || '').trim().toLowerCase();
+  if (!safeEmail || !refreshToken) return;
+  let payload = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+  if (KMS_KEY_NAME) {
+    const enc = await kmsEncrypt_(refreshToken);
+    if (!enc) throw new Error('KMS encrypt returned empty ciphertext.');
+    payload.refresh_token_enc = enc;
+    payload.refresh_token     = admin.firestore.FieldValue.delete();
+  } else {
+    console.warn('KMS_KEY_NAME not set; storing refresh token in plaintext.');
+    payload.refresh_token = refreshToken;
+  }
+  await db.collection(REFRESH_TOKEN_COLLECTION).doc(safeEmail).set(payload, { merge: true });
+}
+
+async function getRefreshTokenForEmail(email) {
+  const safeEmail = String(email || '').trim().toLowerCase();
+  if (!safeEmail) return null;
+  const docRef = db.collection(REFRESH_TOKEN_COLLECTION).doc(safeEmail);
+  const snap   = await docRef.get();
+  if (!snap.exists) return null;
+  const data = snap.data() || {};
+  if (data.refresh_token_enc && KMS_KEY_NAME) {
+    return await kmsDecrypt_(data.refresh_token_enc);
+  }
+  return data.refresh_token || null;
+}
+
+// ================== CONFIG FROM ENV ==================
+const {
+  GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI,
+  SESSION_SECRET, FRONTEND_URL, SAVE_TO_EMAIL,
+  APPSCRIPT_API_KEY, APPS_SCRIPT_WEBHOOK_URL, PUBSUB_TOPIC
+} = process.env;
+
+if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REDIRECT_URI || !SESSION_SECRET || !FRONTEND_URL) {
+  console.error('Missing one or more required environment variables.');
+  process.exit(1);
+}
+
+let FRONTEND_ORIGIN;
+try {
+  FRONTEND_ORIGIN = new URL(FRONTEND_URL).origin;
+} catch (e) {
+  console.error('FRONTEND_URL must be a valid URL, got:', FRONTEND_URL);
+  process.exit(1);
+}
+
+const SAVE_TO        = SAVE_TO_EMAIL || 'save@savment.com';
+const SCRIPT_WEBHOOK = APPS_SCRIPT_WEBHOOK_URL ||
+  'https://script.google.com/macros/s/AKfycbxXItQJ_yoP7H1pKZWTjOpv0GqvF--RqJoNxBWeaCtouUGJyzrVMfHQY6rf0-isNac/exec';
+const PUBSUB_TOPIC_NAME = PUBSUB_TOPIC ||
+  'projects/ringed-cell-472506-j1/topics/gmail-push-notifications';
+
+const CALENDAR_SCRIPT_WEBHOOK =
+  process.env.CALENDAR_SCRIPT_WEBHOOK_URL ||
+  'https://script.google.com/macros/s/AKfycbyGhQsjQFcCl19yh3XbKDdLskPBuLQvwOxPi74uaZUm_bXd9VohQ77XxCLAaq0H5Ro/exec';
+
+// [Calendar2Health] Calendar2Finance와 별개의 Apps Script 웹훅 — Health(Body 탭) 자동 기록용.
+// 환경변수 HEALTH_SCRIPT_WEBHOOK_URL을 Cloud Run에 등록하면 그 값이 우선 사용되고,
+// 없으면 아래 하드코딩된 fallback 배포 URL을 그대로 사용한다.
+const HEALTH_SCRIPT_WEBHOOK =
+  process.env.HEALTH_SCRIPT_WEBHOOK_URL ||
+  'https://script.google.com/a/macros/kairoks.com/s/AKfycby7R2HIdSaRvjeic6KWHdSD9ONhVe_OD8MEn_fWbeVAyTHc0RxtOrdFx36RTNkvA1NX/exec';
+
+const eventColorCache = new Map();
+async function getEventColorById(calendar, colorId) {
+  if (!colorId) return null;
+  if (eventColorCache.has(colorId)) return eventColorCache.get(colorId);
+  try {
+    const colorsRes   = await calendar.colors.get();
+    const eventColors = colorsRes.data.event || {};
+    const hexColor    = eventColors[colorId] ? eventColors[colorId].background : null;
+    eventColorCache.set(colorId, hexColor);
+    return hexColor;
+  } catch (err) { console.error(`Error fetching color for colorId ${colorId}:`, err); return null; }
+}
+
+// ================== SCOPES ==================
+// [v4.0] userinfo.profile 복구 (v3.4에서 재추가, v3.8에서 누락됨)
+// → given_name 포함 → /api/me/status 에서 given_name 반환 가능
+const SCOPES = [
+  'https://www.googleapis.com/auth/calendar.readonly',
+  'https://www.googleapis.com/auth/calendar.events',
+  'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/gmail.send',
+  'https://www.googleapis.com/auth/tasks',
+  'https://www.googleapis.com/auth/spreadsheets',
+  'https://www.googleapis.com/auth/userinfo.email',
+  'https://www.googleapis.com/auth/userinfo.profile',   // [v4.0] 복구
+  'openid'
+];
+
+const app = express();
+app.set('trust proxy', 1);
+app.use(cors({ origin: FRONTEND_ORIGIN, credentials: true }));
+app.use(bodyParser.json());
+app.use(session({
+  name: 'mie-session', keys: [SESSION_SECRET],
+  maxAge: 1000 * 60 * 60 * 24 * 30, secure: true, sameSite: 'none'
+}));
+
+app.get('/', (req, res) => {
+  res.status(200).json({ ok: true, service: 'mie-backend', version: '4.0', message: 'Running' });
+});
+
+// ================== HELPER: OAuth2 CLIENT ==================
+function createOAuth2Client(reqOrNull) {
+  const client = new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI);
+  if (reqOrNull && reqOrNull.session && reqOrNull.session.tokens) {
+    client.setCredentials(reqOrNull.session.tokens);
+  }
+  return client;
+}
+
+// [return_to 안전성 검증] /auth/google?return_to=... 로 들어온 값이 우리 사이트 내부의
+// 상대 경로인지 확인. 외부 도메인으로 리다이렉트되는 오픈 리다이렉트 취약점을 막기 위해
+// '/'로 시작하고, '//'(프로토콜 상대 URL)나 '://'(절대 URL), 역슬래시가 없는 경우만 허용.
+function isSafeReturnPath_(p) {
+  if (typeof p !== 'string' || !p) return false;
+  if (!p.startsWith('/')) return false;
+  if (p.startsWith('//')) return false;
+  if (p.includes('://')) return false;
+  if (p.includes('\\')) return false;
+  return true;
+}
+
+// [REAUTH_REQUIRED 감지] 사용자 본인 세션 토큰(createOAuth2Client(req))으로 Google API를
+// 호출하는 라우트에서 "스코프 부족" 또는 "토큰 무효/만료(invalid_grant)"로 실패했는지 판별.
+// 둘 다 사용자 입장에선 해결책이 동일(재연결)하므로 하나의 신호로 묶는다.
+function isReauthRequiredError_(err) {
+  const msg = ((err && err.message) || '').toLowerCase();
+  return !!(err && (
+    err.code === 401 ||
+    (err.code === 403 && (msg.includes('insufficient') || msg.includes('scope'))) ||
+    msg.includes('invalid_grant') ||
+    msg.includes('invalid_token') ||
+    msg.includes('token has been expired or revoked')
+  ));
+}
+
+async function fetchUserInfo(authClient) {
+  const oauth2   = google.oauth2({ version: 'v2', auth: authClient });
+  const { data } = await oauth2.userinfo.get();
+  return data;
+}
+
+async function listAllEventsForCalendar(calendar, calendarId, baseOptions) {
+  const all = [];
+  let pageToken = null;
+  do {
+    const res = await calendar.events.list({ calendarId, ...baseOptions, pageToken });
+    all.push(...(res.data.items || []));
+    pageToken = res.data.nextPageToken || null;
+  } while (pageToken);
+  return all;
+}
+
+// ============================================================================
+// CALENDAR WATCH HELPERS
+// ============================================================================
+
+async function registerCalendarWatchForUser(email, authClient) {
+  const calendar  = google.calendar({ version: 'v3', auth: authClient });
+
+  // [버그 수정] 새 채널을 만들기 전에 예전 채널을 먼저 정지시킨다.
+  // 이 함수는 6시간마다 자동 갱신(renewExpiringWatches), /api/calendar/watch,
+  // /api/calendar/watch/renew-all 이렇게 세 경로에서 호출되는데, 지금까지는
+  // 매번 새 채널만 추가로 등록하고 예전 채널은 절대 stop()하지 않았다.
+  // Google Calendar API는 같은 캘린더에 watch 채널이 여러 개 동시에 존재하는 걸
+  // 막지 않고, 각 채널이 독립적으로 알림을 보낸다 — 이게 Cal2Health/Cal2Finance
+  // 웹훅이 캘린더 변경 한 번에 5번씩 중복 호출되던 근본 원인이었다(2026-07-25 확인).
+  // ※ 이미 쌓여있는 예전 채널들은 Firestore에 channelId/resourceId가 남아있지
+  // 않아(매번 덮어썼음) 지금 이 코드로는 소급 정지가 안 된다 — 등록 시 준 TTL(7일)이
+  // 지나면 자연히 만료된다. 이 수정은 "앞으로" 채널이 더 쌓이는 것만 막는다.
+  try {
+    const existing = await db.collection('calendar_watch').doc(email).get();
+    if (existing.exists) {
+      const old = existing.data() || {};
+      if (old.channelId && old.resourceId) {
+        try {
+          await calendar.channels.stop({ requestBody: { id: old.channelId, resourceId: old.resourceId } });
+          console.log(`🛑 Stopped previous calendar watch channel for ${email}: ${old.channelId}`);
+        } catch (stopErr) {
+          // 이미 만료됐거나 Google 쪽에서 모르는 채널일 수 있음 — 새 채널 등록은 계속 진행
+          console.warn(`⚠️ Could not stop previous channel for ${email} (may already be expired/invalid): ${stopErr.message}`);
+        }
+      }
+    }
+  } catch (e) {
+    console.warn(`⚠️ Error checking existing watch for ${email} before renewal: ${e.message}`);
+  }
+
+  const channelId = `mie-cal-${email.replace(/[@.]/g, '-')}-${Date.now()}`;
+  const watchRes  = await calendar.events.watch({
+    calendarId: 'primary',
+    requestBody: {
+      id:      channelId,
+      type:    'web_hook',
+      address: 'https://mie-backend-514922143683.us-central1.run.app/api/pubsub/calendar-push',
+      token:   email,
+      params:  { ttl: '604800' }
+    }
+  });
+  const expiration  = watchRes.data.expiration;
+  const resourceId  = watchRes.data.resourceId;
+  const expiresDate = expiration ? new Date(parseInt(expiration)).toISOString() : 'unknown';
+  await db.collection('calendar_watch').doc(email).set({
+    email, channelId, resourceId,
+    expiration: expiration || null,
+    expiresAt:  expiresDate,
+    registeredAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  console.log(`✅ Calendar watch registered for ${email} — expires ${expiresDate}`);
+  return { channelId, resourceId, expiresAt: expiresDate };
+}
+
+async function renewExpiringWatches() {
+  console.log('🔄 [Watch Renewal] Starting scheduled renewal check...');
+  try {
+    const now   = new Date();
+    const in24h = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    const snap  = await db.collection('calendar_watch')
+      .where('expiresAt', '<=', in24h.toISOString()).get();
+    if (snap.empty) { console.log('✅ [Watch Renewal] No watches expiring within 24h.'); return; }
+    console.log(`🔄 [Watch Renewal] ${snap.docs.length} watch(es) expiring within 24h.`);
+    for (const doc of snap.docs) {
+      const email = doc.id;
+      try {
+        const refreshToken = await getRefreshTokenForEmail(email);
+        if (!refreshToken) { console.warn(`⚠️  [Watch Renewal] No token for ${email}`); continue; }
+        const authClient = createOAuth2Client(null);
+        authClient.setCredentials({ refresh_token: refreshToken });
+        await registerCalendarWatchForUser(email, authClient);
+        console.log(`✅ [Watch Renewal] Renewed for ${email}`);
+      } catch (e) { console.error(`❌ [Watch Renewal] Failed for ${email}:`, e.message); }
+    }
+  } catch (e) { console.error('❌ [Watch Renewal] Error:', e.message); }
+}
+
+function scheduleWatchRenewal() {
+  const INTERVAL_MS = 6 * 60 * 60 * 1000;
+  setTimeout(() => {
+    renewExpiringWatches();
+    setInterval(renewExpiringWatches, INTERVAL_MS);
+  }, 60 * 1000);
+  console.log('⏰ [Watch Renewal] Scheduler initialized — runs every 6 hours');
+}
+
+// ================== AUTH ROUTES ==================
+
+app.get('/auth/google', (req, res) => {
+  const client = createOAuth2Client(req);
+  const returnTo = (typeof req.query.return_to === 'string') ? req.query.return_to : '';
+  const state = isSafeReturnPath_(returnTo) ? returnTo : '';
+  const url = client.generateAuthUrl({ access_type: 'offline', prompt: 'consent', scope: SCOPES, state: state });
+  res.redirect(url);
+});
+
+app.get('/auth/google/callback', async (req, res) => {
+  try {
+    const code = req.query.code;
+    if (!code) return res.status(400).send('Missing code');
+    const client = createOAuth2Client(req);
+    const { tokens } = await client.getToken(code);
+    client.setCredentials(tokens);
+    req.session.tokens = tokens;
+    let userInfo = null;
+    try { userInfo = await fetchUserInfo(client); } catch (e) { console.error('Error fetching user info:', e); }
+    req.session.user = userInfo || null;
+    try {
+      const email = userInfo && (userInfo.email || userInfo.primaryEmail);
+      if (tokens.refresh_token && email) {
+        await saveRefreshTokenForEmail(email, tokens.refresh_token);
+        console.log(`✓ Saved refresh token for ${email} (KMS=${!!KMS_KEY_NAME})`);
+      } else if (email) {
+        const existing = await getRefreshTokenForEmail(email);
+        if (existing) { console.log(`✓ Using existing refresh token for ${email}`); }
+        else          { console.warn(`⚠ No refresh token received for ${email}`); }
+      }
+      if (email) {
+        try {
+          await registerCalendarWatchForUser(email, client);
+          console.log(`✅ Calendar watch registered at login for ${email}`);
+        } catch (e) {
+          console.error(`⚠️ Calendar watch registration failed for ${email}:`, e.message);
+        }
+      }
+    } catch (e) { console.error('Failed saving refresh token to Firestore:', e); }
+    // [return_to] state로 돌아온 값이 안전한 내부 경로면 그리로, 아니면 /dashboard로 폴백
+    const returnState = req.query.state;
+    const target = isSafeReturnPath_(returnState) ? (FRONTEND_ORIGIN + returnState) : (FRONTEND_ORIGIN + '/dashboard');
+    res.redirect(target);
+  } catch (err) {
+    console.error('Error in /auth/google/callback:', err);
+    res.status(500).send('Authentication error');
+  }
+});
+
+app.post('/auth/logout', (req, res) => {
+  try { req.session = null; } catch (err) { console.error('Error clearing session:', err); }
+  res.status(200).json({ ok: true });
+});
+
+// ================== API: STATUS ==================
+
+app.get('/api/me/status', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(200).json({ connected: false });
+    const client = createOAuth2Client(req);
+    let userInfo = req.session.user || null;
+    if (!userInfo) {
+      try { userInfo = await fetchUserInfo(client); req.session.user = userInfo; }
+      catch (e) { console.error('Error fetching user info in /api/me/status:', e); }
+    }
+    const email = userInfo && (userInfo.email || userInfo.primaryEmail);
+    res.status(200).json({
+      connected:  true,
+      userEmail:  email || null,
+      given_name: userInfo && userInfo.given_name || null,  // [v4.0] 복구
+      user:       userInfo || null
+    });
+  } catch (err) {
+    console.error('Error in /api/me/status:', err);
+    res.status(500).json({ connected: false, error: 'STATUS_ERROR' });
+  }
+});
+
+// ================== API: CALENDARS ==================
+
+app.get('/api/me/calendars', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache'); res.set('Expires', '0');
+    const client     = createOAuth2Client(req);
+    const calendar   = google.calendar({ version: 'v3', auth: client });
+    const calListRes = await calendar.calendarList.list();
+    // [v4.0] summaryOriginal, accessRole, selected 필드 추가 (v3.4 개선사항 복구)
+    const calendars  = (calListRes.data.items || []).map(c => ({
+      id:              c.id,
+      summary:         c.summaryOverride || c.summary || c.id,
+      summaryOriginal: c.summary || '',               // [v4.0] 추가
+      accessRole:      c.accessRole || '',            // [v4.0] 추가
+      selected:        !!c.selected,                  // [v4.0] 추가
+      backgroundColor: c.backgroundColor || '#3b82f6',
+      primary:         !!c.primary
+    }));
+    console.log(`✅ Returning ${calendars.length} calendars`);
+    res.status(200).json({ calendars });
+  } catch (err) {
+    console.error('Error in /api/me/calendars:', err);
+    if (isReauthRequiredError_(err)) {
+      return res.status(401).json({ error: 'REAUTH_REQUIRED', message: err.message || String(err) });
+    }
+    res.status(err.code === 403 ? 403 : err.code === 404 ? 404 : 500)
+       .json({ error: 'CALENDAR_LIST_FAILED', message: err.message || String(err) });
+  }
+});
+
+// ================== API: EVENTS ==================
+
+app.get('/api/me/events', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache'); res.set('Expires', '0'); res.set('Surrogate-Control', 'no-store');
+    const client   = createOAuth2Client(req);
+    const calendar = google.calendar({ version: 'v3', auth: client });
+    const now = new Date();
+    let timeMin, timeMax;
+    const qMin = req.query.timeMin, qMax = req.query.timeMax;
+    if (qMin && qMax) {
+      const parsedMin = new Date(qMin), parsedMax = new Date(qMax);
+      if (!isNaN(parsedMin.getTime()) && !isNaN(parsedMax.getTime())) {
+        timeMin = parsedMin; timeMax = parsedMax;
+        console.log(`📅 Events requested for range: ${qMin} → ${qMax}`);
+      } else {
+        timeMin = new Date(now); timeMin.setFullYear(now.getFullYear() - 1);
+        timeMax = new Date(now); timeMax.setFullYear(now.getFullYear() + 1);
+      }
+    } else {
+      timeMin = new Date(now); timeMin.setFullYear(now.getFullYear() - 1);
+      timeMax = new Date(now); timeMax.setFullYear(now.getFullYear() + 1);
+    }
+    const baseOptions = {
+      timeMin: timeMin.toISOString(), timeMax: timeMax.toISOString(),
+      singleEvents: true, showDeleted: false, orderBy: 'startTime', maxResults: 2500
+    };
+    const calListRes = await calendar.calendarList.list();
+    const allEvents  = [];
+    for (const cal of (calListRes.data.items || [])) {
+      try {
+        const items = await listAllEventsForCalendar(calendar, cal.id, baseOptions);
+        for (const ev of items) {
+          if (!ev.start || (!ev.start.date && !ev.start.dateTime)) continue;
+          const calColor    = cal.backgroundColor || cal.foregroundColor || null;
+          const eventColor  = ev.colorId ? await getEventColorById(calendar, ev.colorId) : null;
+          const chosenColor = eventColor || calColor;
+          allEvents.push({
+            ...ev, calendarId: cal.id, mieCalendarId: cal.id,
+            mieCalendarSummary: cal.summaryOverride || cal.summary || '',
+            mieCalendarColor: chosenColor, _mieCalendarColor: chosenColor
+          });
+        }
+      } catch (err) { console.error(`Error listing events for calendar ${cal.id}:`, err); }
+    }
+    allEvents.sort((a, b) => {
+      const aStart = (a.start && (a.start.dateTime || a.start.date)) || '';
+      const bStart = (b.start && (b.start.dateTime || b.start.date)) || '';
+      return aStart.localeCompare(bStart);
+    });
+    console.log(`✅ Returning ${allEvents.length} events`);
+    res.status(200).json({ events: allEvents });
+  } catch (err) {
+    console.error('Error in /api/me/events:', err);
+    if (isReauthRequiredError_(err)) {
+      return res.status(401).json({ error: 'REAUTH_REQUIRED', message: err.message || String(err) });
+    }
+    res.status(err.code === 403 ? 403 : err.code === 404 ? 404 : 500)
+       .json({ error: 'EVENT_FETCH_FAILED', message: err.message || String(err) });
+  }
+});
+
+app.post('/api/me/events/update', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { eventId, calendarId, title, start, end, location, description } = req.body || {};
+    if (!eventId)    return res.status(400).json({ error: 'MISSING_EVENT_ID' });
+    if (!calendarId) return res.status(400).json({ error: 'MISSING_CALENDAR_ID' });
+    if (!title)      return res.status(400).json({ error: 'MISSING_TITLE' });
+    if (!start)      return res.status(400).json({ error: 'MISSING_START' });
+    const client    = createOAuth2Client(req);
+    const calendar  = google.calendar({ version: 'v3', auth: client });
+    const isAllDay  = !start.includes('T');
+    const patchBody = { summary: title };
+    if (isAllDay) {
+      patchBody.start = { date: start.slice(0, 10) };
+      patchBody.end   = { date: (end && !end.includes('T')) ? end.slice(0, 10) : start.slice(0, 10) };
+    } else {
+      patchBody.start = { dateTime: start };
+      if (end && end.includes('T')) patchBody.end = { dateTime: end };
+    }
+    if (typeof location    !== 'undefined') patchBody.location    = location    || '';
+    if (typeof description !== 'undefined') patchBody.description = description || '';
+    const result = await calendar.events.patch({ calendarId, eventId, requestBody: patchBody });
+    console.log(`✅ Event updated: ${eventId} on calendar ${calendarId}`);
+    res.status(200).json({ ok: true, event: result.data });
+  } catch (err) {
+    console.error('Error in /api/me/events/update:', err);
+    if (isReauthRequiredError_(err)) {
+      return res.status(401).json({ error: 'REAUTH_REQUIRED', message: err.message || String(err) });
+    }
+    res.status(err.code === 404 ? 404 : err.code === 403 ? 403 : 500)
+       .json({ error: 'EVENT_UPDATE_FAILED', message: err.message || String(err) });
+  }
+});
+
+app.post('/api/me/events/delete', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { eventId, calendarId } = req.body || {};
+    if (!eventId)    return res.status(400).json({ error: 'MISSING_EVENT_ID' });
+    if (!calendarId) return res.status(400).json({ error: 'MISSING_CALENDAR_ID' });
+    const client   = createOAuth2Client(req);
+    const calendar = google.calendar({ version: 'v3', auth: client });
+    await calendar.events.delete({ calendarId, eventId });
+    console.log(`🗑️ Event deleted: ${eventId} on calendar ${calendarId}`);
+    res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('Error in /api/me/events/delete:', err);
+    if (err.code === 410) return res.status(200).json({ ok: true, note: 'Event was already deleted.' });
+    if (isReauthRequiredError_(err)) {
+      return res.status(401).json({ error: 'REAUTH_REQUIRED', message: err.message || String(err) });
+    }
+    res.status(err.code === 404 ? 404 : err.code === 403 ? 403 : 500)
+       .json({ error: 'EVENT_DELETE_FAILED', message: err.message || String(err) });
+  }
+});
+
+app.post('/api/me/events/create', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { calendarId, title, start, end, location, description } = req.body || {};
+    if (!calendarId) return res.status(400).json({ error: 'MISSING_CALENDAR_ID' });
+    if (!title)      return res.status(400).json({ error: 'MISSING_TITLE' });
+    if (!start)      return res.status(400).json({ error: 'MISSING_START' });
+    const client    = createOAuth2Client(req);
+    const calendar  = google.calendar({ version: 'v3', auth: client });
+    const isAllDay  = !start.includes('T');
+    const eventBody = { summary: title };
+    if (isAllDay) {
+      eventBody.start = { date: start.slice(0, 10) };
+      eventBody.end   = { date: (end && !end.includes('T')) ? end.slice(0, 10) : start.slice(0, 10) };
+    } else {
+      eventBody.start = { dateTime: start, timeZone: 'America/Los_Angeles' };
+      if (end && end.includes('T')) {
+        eventBody.end = { dateTime: end, timeZone: 'America/Los_Angeles' };
+      } else {
+        const endDt = new Date(new Date(start).getTime() + 3600000);
+        eventBody.end = { dateTime: endDt.toISOString(), timeZone: 'America/Los_Angeles' };
+      }
+    }
+    if (location)    eventBody.location    = location;
+    if (description) eventBody.description = description;
+    const result = await calendar.events.insert({ calendarId, requestBody: eventBody });
+    console.log(`✅ Event created: ${result.data.id} on calendar ${calendarId}`);
+    res.status(200).json({ ok: true, event: result.data });
+  } catch (err) {
+    console.error('Error in /api/me/events/create:', err);
+    if (isReauthRequiredError_(err)) {
+      return res.status(401).json({ error: 'REAUTH_REQUIRED', message: err.message || String(err) });
+    }
+    res.status(err.code === 403 ? 403 : 500)
+       .json({ error: 'EVENT_CREATE_FAILED', message: err.message || String(err) });
+  }
+});
+
+// ================== API: TASKS ==================
+
+app.get('/api/me/tasks', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache'); res.set('Expires', '0');
+    const client    = createOAuth2Client(req);
+    const tasks     = google.tasks({ version: 'v1', auth: client });
+    const listsRes  = await tasks.tasklists.list({ maxResults: 100 });
+    const taskLists = (listsRes.data.items || []).map(l => ({ id: l.id, title: l.title || 'Untitled List' }));
+    const allTasks  = [];
+    for (const list of taskLists) {
+      try {
+        let pageToken = null;
+        do {
+          const tasksRes = await tasks.tasks.list({
+            tasklist: list.id, showCompleted: true, showHidden: true, maxResults: 100, pageToken
+          });
+          for (const t of (tasksRes.data.items || [])) {
+            allTasks.push({
+              id: t.id, listId: list.id, title: t.title || '', notes: t.notes || '',
+              status: t.status || 'needsAction', due: t.due || null,
+              updated: t.updated || null, position: t.position || null, parent: t.parent || null
+            });
+          }
+          pageToken = tasksRes.data.nextPageToken || null;
+        } while (pageToken);
+      } catch (err) { console.error(`Error fetching tasks for list ${list.id}:`, err); }
+    }
+    console.log(`✅ Returning ${taskLists.length} lists, ${allTasks.length} tasks`);
+    res.status(200).json({ lists: taskLists, tasks: allTasks });
+  } catch (err) {
+    console.error('Error in /api/me/tasks:', err);
+    if (isReauthRequiredError_(err)) {
+      return res.status(401).json({ error: 'REAUTH_REQUIRED', message: err.message || String(err) });
+    }
+    res.status(err.code === 403 ? 403 : err.code === 404 ? 404 : 500)
+       .json({ error: 'TASKS_FETCH_FAILED', message: err.message || String(err) });
+  }
+});
+
+app.post('/api/me/tasks/create', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { listId, title, notes, due } = req.body || {};
+    if (!listId) return res.status(400).json({ error: 'MISSING_LIST_ID' });
+    if (!title)  return res.status(400).json({ error: 'MISSING_TITLE' });
+    const client   = createOAuth2Client(req);
+    const tasks    = google.tasks({ version: 'v1', auth: client });
+    const taskBody = { title: title.trim() };
+    if (notes) taskBody.notes = notes.trim();
+    if (due)   taskBody.due   = due;
+    const result = await tasks.tasks.insert({ tasklist: listId, requestBody: taskBody });
+    console.log(`✅ Task created: "${title}" in list ${listId}`);
+    res.status(200).json({ ok: true, task: {
+      id: result.data.id, listId, title: result.data.title || '',
+      notes: result.data.notes || '', status: result.data.status || 'needsAction', due: result.data.due || null
+    }});
+  } catch (err) {
+    console.error('Error in /api/me/tasks/create:', err);
+    if (isReauthRequiredError_(err)) {
+      return res.status(401).json({ error: 'REAUTH_REQUIRED', message: err.message || String(err) });
+    }
+    res.status(err.code === 403 ? 403 : err.code === 404 ? 404 : 500)
+       .json({ error: 'TASK_CREATE_FAILED', message: err.message || String(err) });
+  }
+});
+
+app.post('/api/me/tasks/update', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { taskId, listId, status, title, notes, due } = req.body || {};
+    if (!taskId) return res.status(400).json({ error: 'MISSING_TASK_ID' });
+    if (!listId) return res.status(400).json({ error: 'MISSING_LIST_ID' });
+    const client = createOAuth2Client(req);
+    const tasks  = google.tasks({ version: 'v1', auth: client });
+    let existing;
+    try { const getRes = await tasks.tasks.get({ tasklist: listId, task: taskId }); existing = getRes.data; }
+    catch (e) { return res.status(404).json({ error: 'TASK_NOT_FOUND' }); }
+    const patchBody = {
+      id:     taskId,
+      title:  title  !== undefined ? title.trim()  : existing.title  || '',
+      notes:  notes  !== undefined ? notes.trim()  : existing.notes  || '',
+      status: status !== undefined ? status         : existing.status || 'needsAction',
+    };
+    if (due !== undefined) { patchBody.due = due || null; } else if (existing.due) { patchBody.due = existing.due; }
+    if (patchBody.status === 'completed' && !existing.completed) { patchBody.completed = new Date().toISOString(); }
+    else if (patchBody.status === 'needsAction') { patchBody.completed = null; }
+    const result = await tasks.tasks.patch({ tasklist: listId, task: taskId, requestBody: patchBody });
+    console.log(`✅ Task updated: ${taskId} in list ${listId} → status=${patchBody.status}`);
+    res.status(200).json({ ok: true, task: {
+      id: result.data.id, listId, title: result.data.title || '',
+      notes: result.data.notes || '', status: result.data.status || 'needsAction', due: result.data.due || null
+    }});
+  } catch (err) {
+    console.error('Error in /api/me/tasks/update:', err);
+    res.status(err.code === 403 ? 403 : err.code === 404 ? 404 : 500)
+       .json({ error: 'TASK_UPDATE_FAILED', message: err.message || String(err) });
+  }
+});
+
+app.post('/api/me/tasks/lists/create', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { title } = req.body || {};
+    if (!title || !title.trim()) return res.status(400).json({ error: 'MISSING_TITLE' });
+    const client = createOAuth2Client(req);
+    const tasks  = google.tasks({ version: 'v1', auth: client });
+    const result = await tasks.tasklists.insert({ requestBody: { title: title.trim() } });
+    console.log(`✅ Task list created: "${title}" → id=${result.data.id}`);
+    res.status(200).json({ ok: true, list: { id: result.data.id, title: result.data.title || title.trim() } });
+  } catch (err) {
+    console.error('Error in /api/me/tasks/lists/create:', err);
+    res.status(500).json({ error: 'LIST_CREATE_FAILED', message: err.message || String(err) });
+  }
+});
+
+// ================== API: MESSAGE ==================
+
+app.post('/api/me/message', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const text = (req.body && req.body.text) ? String(req.body.text).trim() : '';
+    if (!text) return res.status(400).json({ error: 'EMPTY_MESSAGE' });
+    const client = createOAuth2Client(req);
+    const gmail  = google.gmail({ version: 'v1', auth: client });
+    const rawEmail =
+      'To: ' + SAVE_TO + '\r\n' +
+      'Subject: Mie note\r\n' +
+      'Content-Type: text/plain; charset="UTF-8"\r\n' +
+      '\r\n' + text;
+    const encodedMessage = Buffer.from(rawEmail).toString('base64')
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    await gmail.users.messages.send({ userId: 'me', requestBody: { raw: encodedMessage } });
+    res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('Error in /api/me/message:', err);
+    res.status(500).json({ error: 'SEND_FAILED' });
+  }
+});
+
+// ================== APPS SCRIPT TOKEN MINT ==================
+
+app.post('/api/me/access-token', async (req, res) => {
+  try {
+    if (APPSCRIPT_API_KEY) {
+      const key = req.get('X-Mie-Api-Key') || '';
+      if (key !== APPSCRIPT_API_KEY) return res.status(403).json({ error: 'FORBIDDEN' });
+    } else {
+      console.warn('⚠️ APPSCRIPT_API_KEY not set — /api/me/access-token is UNPROTECTED (anyone with an email can mint a live access token).');
+    }
+    const email = req.body && req.body.email ? String(req.body.email).trim().toLowerCase() : '';
+    if (!email) return res.status(400).json({ error: 'MISSING_EMAIL' });
+    const refreshToken = await getRefreshTokenForEmail(email);
+    if (!refreshToken) {
+      return res.status(404).json({
+        error: 'NO_REFRESH_TOKEN_FOR_EMAIL',
+        message: `No refresh token found for ${email}. User must sign in through dashboard first.`
+      });
+    }
+    const client = createOAuth2Client(null);
+    client.setCredentials({ refresh_token: refreshToken });
+    const accessResp  = await client.getAccessToken();
+    const accessToken = (typeof accessResp === 'string') ? accessResp :
+                        (accessResp && accessResp.token) ? accessResp.token : null;
+    if (!accessToken) return res.status(500).json({ error: 'ACCESS_TOKEN_EMPTY' });
+    res.status(200).json({ access_token: accessToken, token_type: 'Bearer' });
+  } catch (err) {
+    console.error('Error in /api/me/access-token:', err);
+    res.status(500).json({ error: 'ACCESS_TOKEN_MINT_FAILED', details: err.message || String(err) });
+  }
+});
+
+// ============================================================
+// GMAIL PUSH NOTIFICATIONS
+// ============================================================
+
+app.post('/api/pubsub/gmail-push', async (req, res) => {
+  res.status(200).json({ ok: true });
+  try {
+    const body = req.body;
+    if (!body || !body.message || !body.message.data) {
+      console.log('📨 Pub/Sub push received but no message data — ignoring');
+      return;
+    }
+    const decoded = Buffer.from(body.message.data, 'base64').toString('utf8');
+    let pushData;
+    try { pushData = JSON.parse(decoded); }
+    catch (e) { console.log('📨 Pub/Sub message not JSON — ignoring:', decoded); return; }
+    const { emailAddress, historyId } = pushData;
+    console.log(`📨 Gmail push received for: ${emailAddress} (historyId: ${historyId})`);
+    if (!SCRIPT_WEBHOOK) {
+      console.error('❌ APPS_SCRIPT_WEBHOOK_URL not set — cannot trigger processAll()');
+      return;
+    }
+    const fetch = (await import('node-fetch')).default;
+    console.log('🚀 Triggering Apps Script processAll() via webhook...');
+    const scriptResp = await fetch(SCRIPT_WEBHOOK, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trigger: 'gmail-push', email: emailAddress, historyId }),
+      timeout: 30000
+    });
+    const scriptStatus = scriptResp.status;
+    const scriptBody   = await scriptResp.text().catch(() => '');
+    if (scriptStatus >= 200 && scriptStatus < 300) {
+      console.log(`✅ Apps Script triggered successfully (HTTP ${scriptStatus})`);
+      // [sync-status] Apps Script 웹훅 호출이 성공적으로 끝난 시점을 "이 계정에 대한
+      // gmail-push 처리가 마지막으로 성공한 시각"으로 기록한다. 이 값은 "이 메시지가
+      // 처리 완료됐다"는 정확한 신호는 아니고, 다른 메일 때문에 갱신됐을 수도 있는
+      // 힌트일 뿐이다 — 프론트에서 대략적인 폴링용으로만 사용한다.
+      try {
+        const safeEmail = (emailAddress || '').toString().trim().toLowerCase();
+        if (safeEmail) {
+          await db.collection('sync_status').doc(safeEmail).set({
+            email: safeEmail,
+            lastSyncAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+        }
+      } catch (syncErr) { console.error('Failed to record sync_status:', syncErr.message || syncErr); }
+    } else {
+      console.error(`❌ Apps Script trigger failed (HTTP ${scriptStatus}): ${scriptBody}`);
+    }
+  } catch (err) { console.error('Error processing Pub/Sub push:', err.message || err); }
+});
+
+// ============================================================
+// SYNC STATUS (폴링용 힌트 — 정확한 "메시지 처리 완료" 신호 아님)
+// ============================================================
+
+app.get('/api/me/sync-status', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    if (!userEmail) return res.status(400).json({ error: 'NO_USER_EMAIL' });
+    const snap = await db.collection('sync_status').doc(userEmail).get();
+    if (!snap.exists) {
+      res.set('Cache-Control', 'no-store');
+      return res.status(200).json({ lastSyncAt: null });
+    }
+    const data = snap.data() || {};
+    const ts   = data.lastSyncAt;
+    const iso  = (ts && typeof ts.toDate === 'function') ? ts.toDate().toISOString() : null;
+    res.set('Cache-Control', 'no-store');
+    res.status(200).json({ lastSyncAt: iso });
+  } catch (err) {
+    console.error('Error in /api/me/sync-status:', err);
+    res.status(500).json({ error: 'SYNC_STATUS_FAILED', message: err.message });
+  }
+});
+
+// ============================================================
+// CALENDAR PUSH
+// ============================================================
+
+app.post('/api/pubsub/calendar-push', async (req, res) => {
+  res.status(200).json({ ok: true });
+  try {
+    const channelToken  = req.get('X-Goog-Channel-Token');
+    const resourceState = req.get('X-Goog-Resource-State');
+    console.log(`📅 Calendar push — state: ${resourceState}, token: ${channelToken}`);
+    if (!channelToken || resourceState === 'sync') return;
+    const userEmail = channelToken.trim().toLowerCase();
+
+    // [Finance] 기존 로직 그대로 — 한 글자도 안 바꿈
+    const triggerFinance = async () => {
+      if (!CALENDAR_SCRIPT_WEBHOOK) {
+        console.error('❌ CALENDAR_SCRIPT_WEBHOOK_URL not set — cannot trigger Calendar2Finance');
+        return;
+      }
+      try {
+        console.log(`🚀 Triggering Calendar2Finance Apps Script for: ${userEmail}`);
+        const fetch = (await import('node-fetch')).default;
+        const scriptResp = await fetch(CALENDAR_SCRIPT_WEBHOOK, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({
+            trigger: 'calendar-push', email: userEmail, resourceState,
+            timestamp: new Date().toISOString()
+          }),
+          timeout: 30000
+        });
+        const scriptStatus = scriptResp.status;
+        const scriptBody   = await scriptResp.text().catch(() => '');
+        if (scriptStatus >= 200 && scriptStatus < 300) {
+          console.log(`✅ Calendar2Finance AS triggered successfully (HTTP ${scriptStatus})`);
+        } else {
+          console.error(`❌ Calendar2Finance AS trigger failed (HTTP ${scriptStatus}): ${scriptBody}`);
+        }
+      } catch (err) {
+        console.error('Error triggering Calendar2Finance:', err.message || err);
+      }
+    };
+
+    // [Health] Calendar2Health — Finance와 완전히 독립적인 시도. Finance가 실패/미설정이어도
+    // 이 블록은 그대로 실행되고, 이 블록이 실패해도 Finance 쪽엔 영향 없음.
+    const triggerHealth = async () => {
+      if (!HEALTH_SCRIPT_WEBHOOK) {
+        console.error('❌ HEALTH_SCRIPT_WEBHOOK_URL not set — cannot trigger Calendar2Health');
+        return;
+      }
+      try {
+        console.log(`🚀 Triggering Calendar2Health Apps Script for: ${userEmail}`);
+        const fetch = (await import('node-fetch')).default;
+        const scriptResp = await fetch(HEALTH_SCRIPT_WEBHOOK, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({
+            trigger: 'calendar-push', email: userEmail, resourceState,
+            timestamp: new Date().toISOString()
+          }),
+          timeout: 30000
+        });
+        const scriptStatus = scriptResp.status;
+        const scriptBody   = await scriptResp.text().catch(() => '');
+        if (scriptStatus >= 200 && scriptStatus < 300) {
+          console.log(`✅ Calendar2Health AS triggered successfully (HTTP ${scriptStatus})`);
+        } else {
+          console.error(`❌ Calendar2Health AS trigger failed (HTTP ${scriptStatus}): ${scriptBody}`);
+        }
+      } catch (err) {
+        console.error('Error triggering Calendar2Health:', err.message || err);
+      }
+    };
+
+    await Promise.allSettled([triggerFinance(), triggerHealth()]);
+  } catch (err) {
+    console.error('Error in /api/pubsub/calendar-push:', err.message || err);
+  }
+});
+
+// ============================================================
+// CALENDAR WATCH 관리 엔드포인트
+// ============================================================
+
+app.get('/api/calendar/watch', async (req, res) => {
+  try {
+    if (APPSCRIPT_API_KEY) {
+      const key = req.query.key || req.get('X-Mie-Api-Key') || '';
+      if (key !== APPSCRIPT_API_KEY) return res.status(403).json({ error: 'FORBIDDEN' });
+    } else {
+      console.warn('⚠️ APPSCRIPT_API_KEY not set — /api/calendar/watch is UNPROTECTED.');
+    }
+    const watchEmail = (req.query.email || '').trim().toLowerCase();
+    if (!watchEmail) return res.status(400).json({ error: 'MISSING_EMAIL' });
+    const refreshToken = await getRefreshTokenForEmail(watchEmail);
+    if (!refreshToken) {
+      return res.status(404).json({
+        error: 'NO_REFRESH_TOKEN',
+        message: `No refresh token for ${watchEmail}. User must sign in first.`
+      });
+    }
+    const authClient = createOAuth2Client(null);
+    authClient.setCredentials({ refresh_token: refreshToken });
+    const result = await registerCalendarWatchForUser(watchEmail, authClient);
+    res.status(200).json({
+      ok: true, email: watchEmail,
+      channelId: result.channelId, expiresAt: result.expiresAt,
+      message: 'Calendar watch registered. Auto-renews every 6 hours.'
+    });
+  } catch (err) {
+    console.error('Error in /api/calendar/watch:', err);
+    res.status(500).json({ error: 'WATCH_FAILED', details: err.message || String(err) });
+  }
+});
+
+app.get('/api/calendar/watch/status', async (req, res) => {
+  try {
+    const watchEmail = (req.query.email || '').trim().toLowerCase();
+    if (!watchEmail) return res.status(400).json({ error: 'MISSING_EMAIL' });
+    const snap = await db.collection('calendar_watch').doc(watchEmail).get();
+    if (!snap.exists) {
+      return res.status(200).json({
+        registered: false, email: watchEmail,
+        message: 'No watch registered. Call /api/calendar/watch to register.'
+      });
+    }
+    const data      = snap.data() || {};
+    const expiresAt = data.expiresAt || null;
+    const now       = new Date();
+    const expiry    = expiresAt ? new Date(expiresAt) : null;
+    const expired   = expiry ? expiry < now : true;
+    const hoursLeft = expiry ? Math.max(0, Math.round((expiry - now) / (1000 * 60 * 60))) : 0;
+    res.status(200).json({
+      registered: true, email: watchEmail, channelId: data.channelId,
+      expiresAt, expired, hoursLeft,
+      message: expired
+        ? '⚠️ Watch expired. Call /api/calendar/watch to re-register.'
+        : `✅ Watch active. Expires in ${hoursLeft} hours.`
+    });
+  } catch (err) {
+    console.error('Error in /api/calendar/watch/status:', err);
+    res.status(500).json({ error: 'STATUS_FAILED', details: err.message });
+  }
+});
+
+app.get('/api/calendar/watch/renew-all', async (req, res) => {
+  try {
+    if (APPSCRIPT_API_KEY) {
+      const key = req.query.key || req.get('X-Mie-Api-Key') || '';
+      if (key !== APPSCRIPT_API_KEY) return res.status(403).json({ error: 'FORBIDDEN' });
+    } else {
+      console.warn('⚠️ APPSCRIPT_API_KEY not set — /api/calendar/watch/renew-all is UNPROTECTED.');
+    }
+    const now   = new Date();
+    const in24h = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    const snap  = await db.collection('calendar_watch')
+      .where('expiresAt', '<=', in24h.toISOString()).get();
+    const results = [];
+    for (const doc of snap.docs) {
+      const email = doc.id;
+      try {
+        const refreshToken = await getRefreshTokenForEmail(email);
+        if (!refreshToken) { results.push({ email, status: 'no_token' }); continue; }
+        const authClient = createOAuth2Client(null);
+        authClient.setCredentials({ refresh_token: refreshToken });
+        await registerCalendarWatchForUser(email, authClient);
+        results.push({ email, status: 'renewed' });
+      } catch (e) { results.push({ email, status: 'error', message: e.message }); }
+    }
+    console.log(`✅ Calendar watch renewal: ${results.length} processed`);
+    res.status(200).json({ ok: true, renewed: results });
+  } catch (err) {
+    console.error('Error in /api/calendar/watch/renew-all:', err);
+    res.status(500).json({ error: 'RENEWAL_FAILED', details: err.message });
+  }
+});
+
+// ============================================================
+// GMAIL WATCH
+// ============================================================
+
+app.get('/api/gmail/watch', async (req, res) => {
+  try {
+    if (APPSCRIPT_API_KEY) {
+      const key = req.query.key || req.get('X-Mie-Api-Key') || '';
+      if (key !== APPSCRIPT_API_KEY) return res.status(403).json({ error: 'FORBIDDEN' });
+    } else {
+      console.warn('⚠️ APPSCRIPT_API_KEY not set — /api/gmail/watch is UNPROTECTED.');
+    }
+    const watchEmail = (req.query.email || SAVE_TO).trim().toLowerCase();
+    console.log(`📧 Registering Gmail watch for: ${watchEmail}`);
+    const refreshToken = await getRefreshTokenForEmail(watchEmail);
+    if (!refreshToken) {
+      return res.status(404).json({
+        error: 'NO_REFRESH_TOKEN',
+        message: `No refresh token for ${watchEmail}. This email must sign in through the dashboard first.`
+      });
+    }
+    const client    = createOAuth2Client(null);
+    client.setCredentials({ refresh_token: refreshToken });
+    const gmail     = google.gmail({ version: 'v1', auth: client });
+    const watchResp = await gmail.users.watch({
+      userId: 'me',
+      requestBody: { topicName: PUBSUB_TOPIC_NAME, labelIds: ['INBOX'], labelFilterAction: 'include' }
+    });
+    const expiration  = watchResp.data.expiration;
+    const historyId   = watchResp.data.historyId;
+    const expiresDate = expiration ? new Date(parseInt(expiration)).toISOString() : 'unknown';
+    console.log(`✅ Gmail watch registered for ${watchEmail}`);
+    await db.collection('gmail_watch').doc(watchEmail).set({
+      email: watchEmail, historyId, expiration: expiration || null,
+      expiresAt: expiresDate, registeredAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    res.status(200).json({
+      ok: true, email: watchEmail, historyId, expiration: expiresDate,
+      message: 'Gmail push watch registered. Expires in ~7 days. Renewal is automatic.'
+    });
+  } catch (err) {
+    console.error('Error in /api/gmail/watch:', err);
+    res.status(500).json({ error: 'WATCH_FAILED', details: err.message || String(err) });
+  }
+});
+
+app.get('/api/gmail/watch/status', async (req, res) => {
+  try {
+    const watchEmail = (req.query.email || SAVE_TO).trim().toLowerCase();
+    const snap       = await db.collection('gmail_watch').doc(watchEmail).get();
+    if (!snap.exists) {
+      return res.status(200).json({
+        registered: false, email: watchEmail,
+        message: 'No watch registered. Call /api/gmail/watch to register.'
+      });
+    }
+    const data      = snap.data() || {};
+    const expiresAt = data.expiresAt || null;
+    const now       = new Date();
+    const expiry    = expiresAt ? new Date(expiresAt) : null;
+    const expired   = expiry ? expiry < now : true;
+    const hoursLeft = expiry ? Math.max(0, Math.round((expiry - now) / (1000 * 60 * 60))) : 0;
+    res.status(200).json({
+      registered: true, email: watchEmail, historyId: data.historyId,
+      expiresAt, expired, hoursLeft,
+      message: expired
+        ? '⚠️ Watch expired. Call /api/gmail/watch to re-register.'
+        : `✅ Watch active. Expires in ${hoursLeft} hours.`
+    });
+  } catch (err) {
+    console.error('Error in /api/gmail/watch/status:', err);
+    res.status(500).json({ error: 'STATUS_FAILED', details: err.message });
+  }
+});
+
+// ============================================================================
+// FINANCE API
+// ============================================================================
+
+const MASTER_SHEET_ID = '1T9qiDQa1DUwMF06V6M_TBO0Nc-36IKeTuIWkpdxh40U';
+const FINANCE_ADMIN   = 'rachel@kairoks.com';
+
+async function getFinanceSheetId_(userEmail) {
+  const adminToken = await getRefreshTokenForEmail(FINANCE_ADMIN);
+  if (!adminToken) throw new Error('No admin refresh token');
+  const adminClient = createOAuth2Client(null);
+  adminClient.setCredentials({ refresh_token: adminToken });
+  const sheets = google.sheets({ version: 'v4', auth: adminClient });
+  const res  = await sheets.spreadsheets.values.get({
+    spreadsheetId: MASTER_SHEET_ID,
+    range: 'UserInfo!A:AB',
+  });
+  const rows = res.data.values || [];
+  for (let r = 1; r < rows.length; r++) {
+    const row      = rows[r];
+    const rowEmail = (row[2] || '').toString().trim().toLowerCase();
+    if (rowEmail === userEmail.toLowerCase()) {
+      const raw = (row[26] || '').toString().trim();
+      if (!raw) throw new Error(`Finance Sheet ID not set for ${userEmail}`);
+      const m = raw.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+      return m ? m[1] : raw;
+    }
+  }
+  throw new Error(`User ${userEmail} not found in Master Sheet`);
+}
+
+// UserInfo AB열 (index 27) = Projects_spreadsheetID
+async function getProjectsSheetId_(userEmail) {
+  const adminToken = await getRefreshTokenForEmail(FINANCE_ADMIN);
+  if (!adminToken) throw new Error('No admin refresh token');
+  const adminClient = createOAuth2Client(null);
+  adminClient.setCredentials({ refresh_token: adminToken });
+  const sheets = google.sheets({ version: 'v4', auth: adminClient });
+  const res  = await sheets.spreadsheets.values.get({
+    spreadsheetId: MASTER_SHEET_ID,
+    range: 'UserInfo!A:AB',
+  });
+  const rows = res.data.values || [];
+  for (let r = 1; r < rows.length; r++) {
+    const row      = rows[r];
+    const rowEmail = (row[2] || '').toString().trim().toLowerCase();
+    if (rowEmail === userEmail.toLowerCase()) {
+      const raw = (row[27] || '').toString().trim();
+      if (!raw) throw new Error(`Projects Sheet ID not set for ${userEmail}`);
+      const m = raw.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+      return m ? m[1] : raw;
+    }
+  }
+  throw new Error(`User ${userEmail} not found in Master Sheet`);
+}
+
+function parseBaselineRows_(rows, targetYearMonth) {
+  const [ty, tm] = targetYearMonth.split('-').map(Number);
+  const targetDate = new Date(ty, tm, 0);
+  const SECTION_MAP = {
+    'Salary': 'INCOME', 'Freelance': 'INCOME', 'Sales': 'INCOME', 'Other Income': 'INCOME',
+    'Rent / Mortgage': 'EXPENSES', 'Groceries': 'EXPENSES', 'Household Essentials': 'EXPENSES',
+    "Renter's / Home Insurance": 'EXPENSES', 'Gas & Electricity': 'EXPENSES', 'Water / Sewer': 'EXPENSES',
+    'Internet': 'EXPENSES', 'Cell Phone': 'EXPENSES', 'Health Insurance': 'EXPENSES',
+    'Car Payment': 'EXPENSES', 'Car Insurance': 'EXPENSES', 'Tax': 'EXPENSES',
+    'Credit Card Payment': 'EXPENSES', 'Transportation - Public Transit': 'EXPENSES',
+    'Transportation - Rideshare': 'EXPENSES', 'Transportation - Gas / EV': 'EXPENSES',
+    'Transportation - Parking': 'EXPENSES', 'Medical / Co-payment': 'EXPENSES',
+    'Pharmacy': 'EXPENSES', 'Gym / Fitness': 'EXPENSES', 'Education': 'EXPENSES',
+    'Gift / Donation': 'EXPENSES', 'Beauty & Personal Care': 'EXPENSES',
+    'Shopping - Clothing': 'EXPENSES', 'Shopping - Electronics': 'EXPENSES',
+    'Snacks & Coffee': 'EXPENSES', 'Dining Out': 'EXPENSES', 'Entertainment': 'EXPENSES',
+    'Subscriptions': 'EXPENSES', 'Hobby': 'EXPENSES', 'Travel': 'EXPENSES',
+    'Other - Needs': 'EXPENSES', 'Other - Wants': 'EXPENSES',
+    'Savings Transfer': 'SAVINGS', 'Emergency Fund': 'SAVINGS',
+    'Retirement': 'SAVINGS', 'Investment': 'SAVINGS',
+  };
+  const SKIP_PATTERNS = ['Category', 'MIE', 'Edit', 'Monthly Budget', 'Annual Budget'];
+  const resultMap = {};
+  for (const row of rows) {
+    if (!row || !row[0]) continue;
+    const category = row[0].toString().trim();
+    if (!category) continue;
+    if (SKIP_PATTERNS.some(p => category.startsWith(p))) continue;
+    const linkedSheet = (row[6] || '').toString().trim();
+    if (!linkedSheet) continue;
+    const section = SECTION_MAP[category];
+    if (!section) continue;
+    const effectiveFrom = (row[4] || '2000-01-01').toString().trim().substring(0, 10);
+    const effDate = new Date(effectiveFrom);
+    if (effDate > targetDate) continue;
+    const monthly_budget = parseFloat((row[1] || '0').toString().replace(/[$,\s]/g, '')) || 0;
+    const annual_budget  = parseFloat((row[2] || '0').toString().replace(/[$,\s]/g, '')) || 0;
+    const notes          = (row[3] || '').toString().trim();
+    if (!resultMap[category] || new Date(resultMap[category].effective_from) <= effDate) {
+      resultMap[category] = {
+        section, category, monthly_budget, annual_budget,
+        effective_from: effectiveFrom, notes, linked_sheet: linkedSheet,
+      };
+    }
+  }
+  return Object.values(resultMap);
+}
+
+function parseTransactionRows_(rows, targetYearMonth) {
+  const result = [];
+  for (let r = 3; r < rows.length; r++) {
+    const row = rows[r];
+    if (!row || !row[0]) continue;
+    const dateRaw = (row[0] || '').toString().trim();
+    if (!dateRaw || dateRaw.length < 7) continue;
+    const rowYM = dateRaw.substring(0, 7);
+    if (targetYearMonth && rowYM !== targetYearMonth) continue;
+    const amount = parseFloat((row[1] || '0').toString().replace(/[$,\s]/g, '')) || 0;
+    if (amount === 0) continue;
+    result.push({
+      date:       dateRaw.substring(0, 10),
+      amount,
+      category:   (row[2] || '').toString().trim(),
+      sublabel:   (row[3] || '').toString().trim(),
+      vs_budget:  parseFloat((row[4] || '0').toString().replace(/[$,\s]/g, '')) || null,
+      source:     (row[5] || 'Direct').toString().trim(),
+      notes:      (row[6] || '').toString().trim(),
+      event_id:   (row[7] || '').toString().trim(),
+      _sheet_row: r + 1,
+    });
+  }
+  return result;
+}
+
+function buildSummary_(income, expenses, savings, baseline) {
+  const totalIncome   = income.reduce((s, r) => s + r.amount, 0);
+  const totalExpenses = expenses.reduce((s, r) => s + r.amount, 0);
+  const totalSavings  = savings.reduce((s, r) => s + r.amount, 0);
+  const incomeBaseline   = baseline.filter(b => b.section === 'INCOME').reduce((s, b) => s + b.monthly_budget, 0);
+  const expensesBaseline = baseline.filter(b => b.section === 'EXPENSES').reduce((s, b) => s + b.monthly_budget, 0);
+  const savingsBaseline  = baseline.filter(b => b.section === 'SAVINGS').reduce((s, b) => s + b.monthly_budget, 0);
+  return {
+    income:   { actual: totalIncome,   budget: incomeBaseline,   diff: totalIncome - incomeBaseline },
+    expenses: { actual: totalExpenses, budget: expensesBaseline, diff: totalExpenses - expensesBaseline },
+    savings:  { actual: totalSavings,  budget: savingsBaseline,  diff: totalSavings - savingsBaseline },
+    remaining: totalIncome - totalExpenses - totalSavings,
+  };
+}
+
+app.get('/api/me/finance', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const now        = new Date();
+    const defaultYM  = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const targetYM   = (req.query.month || defaultYM).substring(0, 7);
+    const ytdMode    = req.query.ytd === 'true';
+    const targetYear = targetYM.substring(0, 4);
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    if (!userEmail) return res.status(400).json({ error: 'NO_USER_EMAIL' });
+    const financeSheetId = await getFinanceSheetId_(userEmail);
+    const adminToken = await getRefreshTokenForEmail(FINANCE_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+    const [baselineRes, incomeRes, expensesRes, savingsRes] = await Promise.all([
+      sheets.spreadsheets.values.get({ spreadsheetId: financeSheetId, range: 'Baseline!A:G' }),
+      sheets.spreadsheets.values.get({ spreadsheetId: financeSheetId, range: 'Income!A:H' }),
+      sheets.spreadsheets.values.get({ spreadsheetId: financeSheetId, range: 'Expenses!A:H' }),
+      sheets.spreadsheets.values.get({ spreadsheetId: financeSheetId, range: 'Savings!A:H' }),
+    ]);
+    const filterYM   = ytdMode ? null : targetYM;
+    const baselineYM = ytdMode ? `${targetYear}-01` : targetYM;
+    const baseline = parseBaselineRows_(baselineRes.data.values || [], baselineYM);
+    const income   = parseTransactionRows_(incomeRes.data.values   || [], filterYM);
+    const expenses = parseTransactionRows_(expensesRes.data.values  || [], filterYM);
+    const savings  = parseTransactionRows_(savingsRes.data.values   || [], filterYM);
+    const summary  = buildSummary_(income, expenses, savings, baseline);
+    res.set('Cache-Control', 'no-store');
+    res.status(200).json({ month: targetYM, ytd: ytdMode, year: targetYear, summary, baseline, income, expenses, savings });
+  } catch (err) {
+    console.error('Error in /api/me/finance:', err);
+    res.status(500).json({ error: 'FINANCE_FETCH_FAILED', message: err.message });
+  }
+});
+
+app.put('/api/me/finance/baseline', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { category, monthly_budget, effective_from, notes } = req.body || {};
+    if (!category)       return res.status(400).json({ error: 'MISSING_CATEGORY' });
+    if (monthly_budget === undefined || monthly_budget === null) return res.status(400).json({ error: 'MISSING_MONTHLY_BUDGET' });
+    if (!effective_from) return res.status(400).json({ error: 'MISSING_EFFECTIVE_FROM' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    const financeSheetId = await getFinanceSheetId_(userEmail);
+    const adminToken = await getRefreshTokenForEmail(FINANCE_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+    const baselineRes = await sheets.spreadsheets.values.get({ spreadsheetId: financeSheetId, range: 'Baseline!A:G' });
+    const rows = baselineRes.data.values || [];
+    let linkedSheet  = '';
+    const annualBudget = parseFloat(monthly_budget) * 12;
+    for (const row of rows) {
+      if ((row[0] || '').toString().trim() === category) { linkedSheet = (row[6] || '').toString().trim(); break; }
+    }
+    if (!linkedSheet) return res.status(404).json({ error: 'CATEGORY_NOT_FOUND', category });
+    const today  = new Date().toISOString().slice(0, 10);
+    const newRow = [
+      category,
+      `$${parseFloat(monthly_budget).toLocaleString('en-US', { minimumFractionDigits: 2 })} `,
+      `$${annualBudget.toLocaleString('en-US', { minimumFractionDigits: 2 })} `,
+      notes || '', effective_from, today, linkedSheet,
+    ];
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: financeSheetId, range: 'Baseline!A:G',
+      valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [newRow] },
+    });
+    res.status(200).json({ ok: true, category, monthly_budget: parseFloat(monthly_budget), annual_budget: annualBudget, effective_from, linked_sheet: linkedSheet });
+  } catch (err) {
+    console.error('Error in /api/me/finance/baseline:', err);
+    res.status(500).json({ error: 'BASELINE_UPDATE_FAILED', message: err.message });
+  }
+});
+
+app.put('/api/me/finance/baseline/bulk', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { effective_from, items } = req.body || {};
+    if (!effective_from) return res.status(400).json({ error: 'MISSING_EFFECTIVE_FROM' });
+    if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: 'MISSING_ITEMS' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    const financeSheetId = await getFinanceSheetId_(userEmail);
+    const adminToken = await getRefreshTokenForEmail(FINANCE_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+    const baselineRes = await sheets.spreadsheets.values.get({ spreadsheetId: financeSheetId, range: 'Baseline!A:G' });
+    const linkedMap = {};
+    for (const row of (baselineRes.data.values || [])) {
+      const cat = (row[0] || '').toString().trim();
+      const linked = (row[6] || '').toString().trim();
+      if (cat && linked && !linkedMap[cat]) linkedMap[cat] = linked;
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    const validItems = items.filter(item => {
+      const cat = (item.category || '').trim();
+      return cat && linkedMap[cat] && item.monthly_budget !== undefined && item.monthly_budget !== null;
+    });
+    if (!validItems.length) return res.status(200).json({ ok: true, saved: 0, message: 'No valid items to save.' });
+    const newRows = validItems.map(item => {
+      const cat     = item.category.trim();
+      const monthly = parseFloat(item.monthly_budget) || 0;
+      const annual  = monthly * 12;
+      return [
+        cat,
+        `$${monthly.toLocaleString('en-US', { minimumFractionDigits: 2 })} `,
+        `$${annual.toLocaleString('en-US', { minimumFractionDigits: 2 })} `,
+        item.notes || '', effective_from, today, linkedMap[cat] || '',
+      ];
+    });
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: financeSheetId, range: 'Baseline!A:G',
+      valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: newRows },
+    });
+    res.status(200).json({ ok: true, saved: newRows.length, effective_from, categories: validItems.map(i => i.category) });
+  } catch (err) {
+    console.error('Error in /api/me/finance/baseline/bulk:', err);
+    res.status(500).json({ error: 'BASELINE_BULK_FAILED', message: err.message || String(err) });
+  }
+});
+
+app.post('/api/me/finance/transaction', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { type, amount, category, sublabel, notes, date, createCalendarEvent } = req.body || {};
+    if (!type)     return res.status(400).json({ error: 'MISSING_TYPE' });
+    if (!amount)   return res.status(400).json({ error: 'MISSING_AMOUNT' });
+    if (!category) return res.status(400).json({ error: 'MISSING_CATEGORY' });
+    const validTypes = ['Income', 'Expenses', 'Savings'];
+    if (!validTypes.includes(type)) return res.status(400).json({ error: 'INVALID_TYPE' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    const financeSheetId = await getFinanceSheetId_(userEmail);
+    const adminToken = await getRefreshTokenForEmail(FINANCE_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+    const today     = date || new Date().toISOString().slice(0, 10);
+    const amountNum = parseFloat(amount);
+    const rowData   = [ `'${today}`, amountNum, category, sublabel || '', '', 'Direct', notes || '', '' ];
+    const appendRes = await sheets.spreadsheets.values.append({
+      spreadsheetId: financeSheetId, range: `${type}!A1`,
+      valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [rowData] },
+    });
+    const updatedRange = (appendRes.data.updates || {}).updatedRange || '';
+    const rowNumMatch  = updatedRange.match(/(\d+)$/);
+    const rowNum       = rowNumMatch ? parseInt(rowNumMatch[1]) : 0;
+    if (rowNum) {
+      const formula = `=IFERROR(IF(B${rowNum}=0,"",B${rowNum}-VLOOKUP(C${rowNum},Baseline!A:B,2,0)),"-")`;
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: financeSheetId, range: `${type}!E${rowNum}`,
+        valueInputOption: 'USER_ENTERED', requestBody: { values: [[formula]] },
+      });
+    }
+    let calendarEvent = null;
+    let calendarReauthRequired = false;
+    if (createCalendarEvent) {
+      try {
+        const userClient = createOAuth2Client(req);
+        const calendar   = google.calendar({ version: 'v3', auth: userClient });
+        const masterSheets = google.sheets({ version: 'v4', auth: adminClient });
+        const masterRes    = await masterSheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: 'UserInfo!A:O' });
+        const masterRows   = masterRes.data.values || [];
+        let   colorId      = null;
+        const COLOR_MAP    = { lavender:'1',sage:'2',grape:'3',flamingo:'4',banana:'5',tangerine:'6',peacock:'7',graphite:'8',blueberry:'9',basil:'10',tomato:'11' };
+        for (let r = 1; r < masterRows.length; r++) {
+          if ((masterRows[r][2] || '').toString().trim().toLowerCase() === userEmail) {
+            colorId = COLOR_MAP[(masterRows[r][14] || '').toString().trim().toLowerCase()] || null; break;
+          }
+        }
+        const eventTitle = sublabel ? `${category} $${amountNum} | ${sublabel}` : `${category} $${amountNum}`;
+        const eventBody  = { summary: eventTitle, description: notes || '', start: { date: today }, end: { date: today }, visibility: 'private' };
+        if (colorId) eventBody.colorId = colorId;
+        const calRes  = await calendar.events.insert({ calendarId: 'primary', requestBody: eventBody });
+        calendarEvent = { id: calRes.data.id, htmlLink: calRes.data.htmlLink };
+        if (rowNum && calendarEvent.id) {
+          await sheets.spreadsheets.values.update({
+            spreadsheetId: financeSheetId, range: `${type}!H${rowNum}`,
+            valueInputOption: 'USER_ENTERED', requestBody: { values: [[calendarEvent.id]] },
+          });
+        }
+      } catch (calErr) {
+        console.error('Calendar event creation failed:', calErr.message);
+        // [REAUTH_REQUIRED 신호] 트랜잭션(위 appendRes)은 이미 저장 성공했으므로
+        // 전체 요청을 실패 처리하지 않고, 캘린더 파트만 실패했다는 신호를 응답에 실어 보낸다.
+        if (isReauthRequiredError_(calErr)) calendarReauthRequired = true;
+      }
+    }
+    res.status(200).json({
+      ok: true, transaction: { date: today, amount: amountNum, category, sublabel: sublabel || '', notes: notes || '', source: 'Direct', type, row: rowNum },
+      calendar_event: calendarEvent, calendar_reauth_required: calendarReauthRequired,
+    });
+  } catch (err) {
+    console.error('Error in /api/me/finance/transaction:', err);
+    res.status(500).json({ error: 'TRANSACTION_FAILED', message: err.message });
+  }
+});
+
+app.post('/api/me/finance/transaction/edit', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { tabName, rowIdx, amount, date, category, sublabel, notes, eventId } = req.body || {};
+    if (!tabName)             return res.status(400).json({ error: 'MISSING_TAB_NAME' });
+    if (amount === undefined) return res.status(400).json({ error: 'MISSING_AMOUNT' });
+    if (rowIdx === undefined) return res.status(400).json({ error: 'MISSING_ROW_IDX' });
+    const TAB_MAP  = { income: 'Income', expenses: 'Expenses', savings: 'Savings' };
+    const sheetTab = TAB_MAP[tabName.toLowerCase()];
+    if (!sheetTab) return res.status(400).json({ error: 'INVALID_TAB_NAME' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    const financeSheetId = await getFinanceSheetId_(userEmail);
+    const adminToken = await getRefreshTokenForEmail(FINANCE_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+    const tabRes = await sheets.spreadsheets.values.get({ spreadsheetId: financeSheetId, range: `${sheetTab}!A:H` });
+    const rows = tabRes.data.values || [];
+    let sheetRowNumber = null, matchCount = 0;
+    for (let r = 3; r < rows.length; r++) {
+      const row = rows[r]; if (!row || !row[0]) continue;
+      const dateRaw = (row[0] || '').toString().trim(); if (!dateRaw || dateRaw.length < 7) continue;
+      const amt = parseFloat((row[1] || '0').toString().replace(/[$,\s]/g, '')) || 0; if (amt === 0) continue;
+      if (matchCount === parseInt(rowIdx)) { sheetRowNumber = r + 1; break; } matchCount++;
+    }
+    if (!sheetRowNumber) return res.status(404).json({ error: 'ROW_NOT_FOUND' });
+    const amountNum = parseFloat(amount) || 0;
+    const newDate   = date || new Date().toISOString().slice(0, 10);
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: financeSheetId,
+      requestBody: {
+        valueInputOption: 'USER_ENTERED',
+        data: [
+          { range: `${sheetTab}!A${sheetRowNumber}`, values: [[`'${newDate}`]] },
+          { range: `${sheetTab}!B${sheetRowNumber}`, values: [[amountNum]] },
+          { range: `${sheetTab}!C${sheetRowNumber}`, values: [[category || '']] },
+          { range: `${sheetTab}!D${sheetRowNumber}`, values: [[sublabel || '']] },
+          { range: `${sheetTab}!G${sheetRowNumber}`, values: [[notes || '']] },
+        ],
+      },
+    });
+    let calendarUpdated = false;
+    if (eventId && eventId.trim()) {
+      try {
+        const userClient = createOAuth2Client(req);
+        const calendar   = google.calendar({ version: 'v3', auth: userClient });
+        const newTitle   = sublabel ? `${category} $${amountNum} | ${sublabel}` : `${category} $${amountNum}`;
+        await calendar.events.patch({ calendarId: 'primary', eventId: eventId.trim(), requestBody: { summary: newTitle, start: { date: newDate }, end: { date: newDate }, description: notes || '' } });
+        calendarUpdated = true;
+      } catch (calErr) { console.error('Calendar event update failed:', calErr.message); }
+    }
+    res.status(200).json({ ok: true, sheetRow: sheetRowNumber, calendarUpdated });
+  } catch (err) {
+    console.error('Error in /api/me/finance/transaction/edit:', err);
+    res.status(500).json({ error: 'EDIT_FAILED', message: err.message });
+  }
+});
+
+app.post('/api/me/finance/transaction/delete', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { tabName, rowIdx, eventId } = req.body || {};
+    if (!tabName)             return res.status(400).json({ error: 'MISSING_TAB_NAME' });
+    if (rowIdx === undefined) return res.status(400).json({ error: 'MISSING_ROW_IDX' });
+    const TAB_MAP  = { income: 'Income', expenses: 'Expenses', savings: 'Savings' };
+    const sheetTab = TAB_MAP[tabName.toLowerCase()];
+    if (!sheetTab) return res.status(400).json({ error: 'INVALID_TAB_NAME' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    const financeSheetId = await getFinanceSheetId_(userEmail);
+    const adminToken = await getRefreshTokenForEmail(FINANCE_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+    const tabRes = await sheets.spreadsheets.values.get({ spreadsheetId: financeSheetId, range: `${sheetTab}!A:H` });
+    const rows = tabRes.data.values || [];
+    let sheetRowNumber = null, matchCount = 0;
+    for (let r = 3; r < rows.length; r++) {
+      const row = rows[r]; if (!row || !row[0]) continue;
+      const dateRaw = (row[0] || '').toString().trim(); if (!dateRaw || dateRaw.length < 7) continue;
+      const amt = parseFloat((row[1] || '0').toString().replace(/[$,\s]/g, '')) || 0; if (amt === 0) continue;
+      if (matchCount === parseInt(rowIdx)) { sheetRowNumber = r + 1; break; } matchCount++;
+    }
+    if (!sheetRowNumber) return res.status(404).json({ error: 'ROW_NOT_FOUND' });
+    const spreadsheetMeta = await sheets.spreadsheets.get({ spreadsheetId: financeSheetId });
+    const sheetMeta = (spreadsheetMeta.data.sheets || []).find(s => s.properties.title === sheetTab);
+    const sheetId   = sheetMeta ? sheetMeta.properties.sheetId : null;
+    if (sheetId !== null) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: financeSheetId,
+        requestBody: { requests: [{ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex: sheetRowNumber - 1, endIndex: sheetRowNumber } } }] },
+      });
+    } else {
+      await sheets.spreadsheets.values.clear({ spreadsheetId: financeSheetId, range: `${sheetTab}!A${sheetRowNumber}:H${sheetRowNumber}` });
+    }
+    let calendarDeleted = false;
+    if (eventId && eventId.trim()) {
+      try {
+        const userClient = createOAuth2Client(req);
+        const calendar   = google.calendar({ version: 'v3', auth: userClient });
+        await calendar.events.delete({ calendarId: 'primary', eventId: eventId.trim() });
+        calendarDeleted = true;
+      } catch (calErr) {
+        if (calErr.code === 410 || calErr.code === 404) calendarDeleted = true;
+        else console.error('Calendar event delete failed:', calErr.message);
+      }
+    }
+    res.status(200).json({ ok: true, sheetRow: sheetRowNumber, calendarDeleted });
+  } catch (err) {
+    console.error('Error in /api/me/finance/transaction/delete:', err);
+    res.status(500).json({ error: 'DELETE_FAILED', message: err.message });
+  }
+});
+
+// ============================================================================
+// HYBRID OVERRIDE API
+// Needs/Wants 양쪽으로 쓰일 수 있는 카테고리(예: Shopping - Clothing, Gym / Fitness)에 대해
+// 사용자가 수동으로 N/W를 지정해두는 기능. Baseline 탭은 예산 변경 시 새 행을 append하는
+// 이력(버전) 구조라 여기에 얹으면 값이 유실되므로, 같은 Finance 스프레드시트 안에
+// 별도 탭(Hybrid_Overrides, 2컬럼: Category/Override)을 두고 이력 없이 덮어쓰기(upsert)만 한다.
+// 탭이 아직 없으면 첫 저장 시 자동 생성한다(사용자가 미리 만들어뒀어도 문제 없음 — 있으면 그대로 사용).
+// ============================================================================
+const HYBRID_CATS = ['Shopping - Clothing', 'Gym / Fitness']; // miarvo_variant_b_up.html의 HYBRID_CATS와 동일하게 유지할 것
+
+async function ensureHybridOverridesTab_(sheets, spreadsheetId) {
+  const meta = await sheets.spreadsheets.get({ spreadsheetId });
+  const exists = (meta.data.sheets || []).some(s => s.properties.title === 'Hybrid_Overrides');
+  if (exists) return;
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: { requests: [{ addSheet: { properties: { title: 'Hybrid_Overrides' } } }] },
+  });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId, range: 'Hybrid_Overrides!A1:B1',
+    valueInputOption: 'USER_ENTERED', requestBody: { values: [['Category', 'Override']] },
+  });
+}
+
+app.get('/api/me/finance/hybrid-overrides', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    if (!userEmail) return res.status(400).json({ error: 'NO_USER_EMAIL' });
+    const financeSheetId = await getFinanceSheetId_(userEmail);
+    const adminToken = await getRefreshTokenForEmail(FINANCE_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+
+    let rows;
+    try {
+      const r = await sheets.spreadsheets.values.get({ spreadsheetId: financeSheetId, range: 'Hybrid_Overrides!A:B' });
+      rows = r.data.values || [];
+    } catch (e) {
+      // 탭이 아직 없음 — 신규 상태, 에러 아님
+      res.set('Cache-Control', 'no-store');
+      return res.status(200).json({ overrides: {} });
+    }
+    const overrides = {};
+    for (let r = 1; r < rows.length; r++) { // 1행은 헤더
+      const row = rows[r]; if (!row || !row[0]) continue;
+      const cat = row[0].toString().trim();
+      const val = (row[1] || '').toString().trim().toUpperCase();
+      if (cat && (val === 'N' || val === 'W')) overrides[cat] = val;
+    }
+    res.set('Cache-Control', 'no-store');
+    res.status(200).json({ overrides });
+  } catch (err) {
+    console.error('Error in /api/me/finance/hybrid-overrides GET:', err);
+    res.status(500).json({ error: 'HYBRID_OVERRIDES_FETCH_FAILED', message: err.message });
+  }
+});
+
+app.post('/api/me/finance/hybrid-overrides', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { category, value } = req.body || {};
+    const cat = (category || '').toString().trim();
+    const val = (value || '').toString().trim().toUpperCase();
+    if (!cat)                          return res.status(400).json({ error: 'MISSING_CATEGORY' });
+    if (val !== 'N' && val !== 'W')    return res.status(400).json({ error: 'INVALID_VALUE' }); // N 또는 W만 허용
+    if (!HYBRID_CATS.includes(cat))    return res.status(400).json({ error: 'NOT_A_HYBRID_CATEGORY', category: cat }); // 클라이언트 검증만 믿지 않고 서버에서도 확인
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    if (!userEmail) return res.status(400).json({ error: 'NO_USER_EMAIL' });
+    const financeSheetId = await getFinanceSheetId_(userEmail);
+    const adminToken = await getRefreshTokenForEmail(FINANCE_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+
+    await ensureHybridOverridesTab_(sheets, financeSheetId);
+    const existing = await sheets.spreadsheets.values.get({ spreadsheetId: financeSheetId, range: 'Hybrid_Overrides!A:B' });
+    const rows = existing.data.values || [];
+    let foundRow = null;
+    for (let r = 1; r < rows.length; r++) {
+      if (rows[r] && (rows[r][0] || '').toString().trim() === cat) { foundRow = r + 1; break; }
+    }
+    if (foundRow) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: financeSheetId, range: `Hybrid_Overrides!B${foundRow}`,
+        valueInputOption: 'USER_ENTERED', requestBody: { values: [[val]] },
+      });
+    } else {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: financeSheetId, range: 'Hybrid_Overrides!A:B',
+        valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: [[cat, val]] },
+      });
+    }
+    res.status(200).json({ ok: true, category: cat, value: val });
+  } catch (err) {
+    console.error('Error in /api/me/finance/hybrid-overrides POST:', err);
+    res.status(500).json({ error: 'HYBRID_OVERRIDES_SAVE_FAILED', message: err.message });
+  }
+});
+
+// ============================================================================
+// DASHBOARD PREFS API  [신규 — General Settings: Overview 대시보드 표시 범위]
+// UserInfo AC열 (index 28), 헤더명 "Overview Type" (사용자가 시트에서 직접 리네임함).
+// 값: 'simple' | 'finance' | 'health' | 'all'
+//   finance / health 각각: 'off'(항상 숨김) | 'on'(항상 표시) | 'auto'(이번 달 데이터 있을 때만)
+//   기본값은 둘 다 'auto'.
+// [재구조화] 예전엔 AC열에 'simple'/'finance'/'health'/'all' 문자열 하나만 저장했는데,
+// 그 4가지 조합만으로는 "Finance는 자동, Health는 항상 끔" 같은 조합을 표현할 수 없어서
+// Finance/Health를 독립된 2개 값으로 쪼갰다. 같은 AC열에 JSON으로 저장한다(컬럼 안 늘림).
+// [하위호환] 시트에 이미 예전 방식 문자열(예: "all", "finance", 대문자 "ALL" 등)이 들어있는
+// 계정도 있으므로, JSON 파싱이 안 되면 예전 문자열로 보고 아래 매핑대로 변환해서 응답한다:
+//   simple → {finance:'auto',health:'auto'} / finance → {finance:'on',health:'off'}
+//   health → {finance:'off',health:'on'}    / all     → {finance:'on',health:'on'}
+// 저장은 항상 새 JSON 형식으로 하므로, 한 번 저장하고 나면 그 계정은 새 형식으로 넘어간다.
+// ============================================================================
+const DASHBOARD_DISPLAY_VALUES = ['off', 'on', 'auto'];
+const LEGACY_OVERVIEW_TYPE_MAP = {
+  simple:  { finance: 'auto', health: 'auto' },
+  finance: { finance: 'on',   health: 'off'  },
+  health:  { finance: 'off',  health: 'on'   },
+  all:     { finance: 'on',   health: 'on'   },
+};
+function parseDashboardDisplayCell_(raw) {
+  raw = (raw || '').toString().trim();
+  if (!raw) return { finance: 'auto', health: 'auto' };
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && DASHBOARD_DISPLAY_VALUES.includes(parsed.finance) && DASHBOARD_DISPLAY_VALUES.includes(parsed.health)) {
+      return { finance: parsed.finance, health: parsed.health };
+    }
+  } catch (e) { /* JSON 아니면 아래 레거시 문자열 처리로 */ }
+  const legacy = LEGACY_OVERVIEW_TYPE_MAP[raw.toLowerCase()];
+  return legacy || { finance: 'auto', health: 'auto' };
+}
+
+app.get('/api/me/dashboard-prefs', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    if (!userEmail) return res.status(400).json({ error: 'NO_USER_EMAIL' });
+    const adminToken = await getRefreshTokenForEmail(FINANCE_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+    const result = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: 'UserInfo!A:AC' });
+    const rows = result.data.values || [];
+    let display = { finance: 'auto', health: 'auto' };
+    for (let r = 1; r < rows.length; r++) {
+      const row = rows[r];
+      const rowEmail = (row[2] || '').toString().trim().toLowerCase();
+      if (rowEmail === userEmail) {
+        display = parseDashboardDisplayCell_(row[28]);
+        break;
+      }
+    }
+    res.set('Cache-Control', 'no-store');
+    res.status(200).json(display);
+  } catch (err) {
+    console.error('Error in /api/me/dashboard-prefs GET:', err);
+    res.status(500).json({ error: 'DASHBOARD_PREFS_FETCH_FAILED', message: err.message });
+  }
+});
+
+app.post('/api/me/dashboard-prefs', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const finance = (req.body && req.body.finance || '').toString().trim().toLowerCase();
+    const health  = (req.body && req.body.health  || '').toString().trim().toLowerCase();
+    if (!DASHBOARD_DISPLAY_VALUES.includes(finance) || !DASHBOARD_DISPLAY_VALUES.includes(health)) {
+      return res.status(400).json({ error: 'INVALID_VALUE', allowed: DASHBOARD_DISPLAY_VALUES });
+    }
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    if (!userEmail) return res.status(400).json({ error: 'NO_USER_EMAIL' });
+    const adminToken = await getRefreshTokenForEmail(FINANCE_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+    const result = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: 'UserInfo!A:AC' });
+    const rows = result.data.values || [];
+    let sheetRow = null;
+    for (let r = 1; r < rows.length; r++) {
+      const rowEmail = (rows[r][2] || '').toString().trim().toLowerCase();
+      if (rowEmail === userEmail) { sheetRow = r + 1; break; }
+    }
+    if (!sheetRow) return res.status(404).json({ error: 'USER_NOT_FOUND' });
+    // 단일 스칼라 값이므로 append가 아니라 그 자리에서 덮어쓴다 (Hybrid_Overrides의
+    // update-in-place와 동일한 방식 — Baseline/Records처럼 이력을 쌓을 이유가 없음).
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: MASTER_SHEET_ID, range: `UserInfo!AC${sheetRow}`,
+      valueInputOption: 'USER_ENTERED', requestBody: { values: [[JSON.stringify({ finance, health })]] },
+    });
+    console.log(`✅ Dashboard display saved: finance=${finance} health=${health} for ${userEmail}`);
+    res.status(200).json({ ok: true, finance, health });
+  } catch (err) {
+    console.error('Error in /api/me/dashboard-prefs POST:', err);
+    res.status(500).json({ error: 'DASHBOARD_PREFS_SAVE_FAILED', message: err.message });
+  }
+});
+
+// ============================================================================
+// HEALTH MINI DISPLAY CONFIG API  [신규/확장 — Settings: Health 미니카드 표시 설정]
+// UserInfo AD열 (index 29) — JSON 객체 문자열: {items:[], auto_items:bool, womens_mode:'auto'|'pregnancy'|'period'}
+//   items       : 수동으로 고른 항목 키 목록. 비어있지 않으면 이게 최우선(자동감지 무시).
+//   auto_items  : items가 비어있을 때만 의미 있음. true면 "이번 달에 그 항목 데이터가
+//                 있는 것만" 항목별로 자동 표시. false(기본)면 12개(+womens) 전체 표시.
+//   womens_mode : Women's 슬롯 안에서 무엇을 보여줄지 — 'auto'(데이터로 자동판단, 기본) |
+//                 'pregnancy'(항상 임신 주차) | 'period'(항상 다음 생리 D-day).
+//                 이 값은 Women's 슬롯 자체를 보이게/숨기게 하지 않는다 — 슬롯 표시 여부는
+//                 오직 items/auto_items(위)로만 결정한다(숨기는 방법을 한 곳에만 두기로 함).
+// [하위호환] 예전엔 이 컬럼에 배열만 저장했었다(예: '["glucose","weight"]'). 배열이면
+// {items: 그 배열, auto_items:false, womens_mode:'auto'}로 취급한다.
+// ============================================================================
+const HEALTH_MINI_ITEM_KEYS = ['cals','steps','dist','activecal','water','weight','bp','hr','spo2','glucose','sleep','mood','womens'];
+const WOMENS_MODE_VALUES = ['auto', 'pregnancy', 'period'];
+
+function parseHealthDisplayConfigCell_(raw) {
+  raw = (raw || '').toString().trim();
+  const fallback = { items: [], auto_items: false, womens_mode: 'auto' };
+  if (!raw) return fallback;
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch (e) { return fallback; }
+  if (Array.isArray(parsed)) {
+    // 예전 형식(배열만) — 하위호환
+    return { items: parsed.filter(k => HEALTH_MINI_ITEM_KEYS.includes(k)), auto_items: false, womens_mode: 'auto' };
+  }
+  if (parsed && typeof parsed === 'object') {
+    return {
+      items: Array.isArray(parsed.items) ? parsed.items.filter(k => HEALTH_MINI_ITEM_KEYS.includes(k)) : [],
+      auto_items: !!parsed.auto_items,
+      womens_mode: WOMENS_MODE_VALUES.includes(parsed.womens_mode) ? parsed.womens_mode : 'auto',
+    };
+  }
+  return fallback;
+}
+
+app.get('/api/me/health/display-items', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    if (!userEmail) return res.status(400).json({ error: 'NO_USER_EMAIL' });
+    const adminToken = await getRefreshTokenForEmail(FINANCE_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+    const result = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: 'UserInfo!A:AD' });
+    const rows = result.data.values || [];
+    let config = { items: [], auto_items: false, womens_mode: 'auto' };
+    for (let r = 1; r < rows.length; r++) {
+      const row = rows[r];
+      const rowEmail = (row[2] || '').toString().trim().toLowerCase();
+      if (rowEmail === userEmail) {
+        config = parseHealthDisplayConfigCell_(row[29]);
+        break;
+      }
+    }
+    res.set('Cache-Control', 'no-store');
+    res.status(200).json(config);
+  } catch (err) {
+    console.error('Error in /api/me/health/display-items GET:', err);
+    res.status(500).json({ error: 'HEALTH_DISPLAY_ITEMS_FETCH_FAILED', message: err.message });
+  }
+});
+
+app.post('/api/me/health/display-items', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const body = req.body || {};
+    const rawItems = Array.isArray(body.items) ? body.items : [];
+    const items = rawItems.filter(k => HEALTH_MINI_ITEM_KEYS.includes(k));
+    const auto_items = !!body.auto_items;
+    const womens_mode = WOMENS_MODE_VALUES.includes(body.womens_mode) ? body.womens_mode : 'auto';
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    if (!userEmail) return res.status(400).json({ error: 'NO_USER_EMAIL' });
+    const adminToken = await getRefreshTokenForEmail(FINANCE_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+    const result = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: 'UserInfo!A:AD' });
+    const rows = result.data.values || [];
+    let sheetRow = null;
+    for (let r = 1; r < rows.length; r++) {
+      const rowEmail = (rows[r][2] || '').toString().trim().toLowerCase();
+      if (rowEmail === userEmail) { sheetRow = r + 1; break; }
+    }
+    if (!sheetRow) return res.status(404).json({ error: 'USER_NOT_FOUND' });
+    const config = { items, auto_items, womens_mode };
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: MASTER_SHEET_ID, range: `UserInfo!AD${sheetRow}`,
+      valueInputOption: 'USER_ENTERED', requestBody: { values: [[JSON.stringify(config)]] },
+    });
+    console.log(`✅ Health display config saved: ${JSON.stringify(config)} for ${userEmail}`);
+    res.status(200).json({ ok: true, ...config });
+  } catch (err) {
+    console.error('Error in /api/me/health/display-items POST:', err);
+    res.status(500).json({ error: 'HEALTH_DISPLAY_ITEMS_SAVE_FAILED', message: err.message });
+  }
+});
+
+// ============================================================================
+// PROJECTS API
+// rachel@kairoks.com 토큰으로 각 유저의 Projects Sheet 읽기/쓰기
+// UserInfo AB열 (index 27) = Projects_spreadsheetID
+// 시트 구조: 탭 'Projects', 4행 헤더, 5행부터 데이터
+// 컬럼: A=name B=completed C=total D=due E=status F=created_at
+// ============================================================================
+
+app.get('/api/me/projects', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    if (!userEmail) return res.status(400).json({ error: 'NO_USER_EMAIL' });
+
+    let projectsSheetId;
+    try {
+      projectsSheetId = await getProjectsSheetId_(userEmail);
+    } catch (e) {
+      // 아직 이 사용자에게 Projects 시트가 연결되지 않은 상태 — 에러 대신 빈 목록 반환
+      res.set('Cache-Control', 'no-store');
+      return res.status(200).json({ projects: [] });
+    }
+
+    const adminToken = await getRefreshTokenForEmail(FINANCE_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+
+    let rows;
+    try {
+      const result = await sheets.spreadsheets.values.get({ spreadsheetId: projectsSheetId, range: 'Projects!A:F' });
+      rows = result.data.values || [];
+    } catch (e) {
+      // 'Projects' 탭이 아직 없는 경우 등
+      res.set('Cache-Control', 'no-store');
+      return res.status(200).json({ projects: [] });
+    }
+
+    const projects = [];
+    for (let r = 4; r < rows.length; r++) { // 5행부터 (0-indexed 4)
+      const row = rows[r];
+      if (!row || !row[0]) continue;
+      const name = (row[0] || '').toString().trim();
+      if (!name) continue;
+      projects.push({
+        name,
+        completed: parseInt(row[1], 10) || 0,
+        total:     parseInt(row[2], 10) || 0,
+        due:       (row[3] || '').toString().trim(),
+      });
+    }
+    res.set('Cache-Control', 'no-store');
+    res.status(200).json({ projects });
+  } catch (err) {
+    console.error('Error in /api/me/projects:', err);
+    res.status(500).json({ error: 'PROJECTS_FETCH_FAILED', message: err.message });
+  }
+});
+
+app.post('/api/me/projects/create', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { name, due, status } = req.body || {};
+    const trimmedName = (name || '').toString().trim();
+    if (!trimmedName) return res.status(400).json({ error: 'MISSING_NAME' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    if (!userEmail) return res.status(400).json({ error: 'NO_USER_EMAIL' });
+
+    const projectsSheetId = await getProjectsSheetId_(userEmail); // 없으면 catch에서 500
+    const adminToken = await getRefreshTokenForEmail(FINANCE_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+
+    const today  = new Date().toISOString().slice(0, 10);
+    const dueStr = (due || '').toString().trim();
+    const statusStr = (status || '').toString().trim() || 'Planning';
+    const newRow = [trimmedName, 0, 0, dueStr, statusStr, today];
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: projectsSheetId, range: 'Projects!A:F',
+      valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [newRow] },
+    });
+
+    res.status(200).json({
+      ok: true,
+      project: { name: trimmedName, completed: 0, total: 0, due: dueStr, status: statusStr },
+    });
+  } catch (err) {
+    console.error('Error in /api/me/projects/create:', err);
+    res.status(500).json({ error: 'PROJECTS_CREATE_FAILED', message: err.message });
+  }
+});
+
+// ============================================================================
+// FINANCE NEEDS_REVIEW API
+// Sync Log 탭(A:Timestamp, B:Source, C:Raw Event Title, D:Parsed Type, E:Parsed Category,
+// F:Parsed Amount, G:Destination Sheet, H:Status, I:Calendar Event ID)에서
+// status === 'NEEDS_REVIEW'인 행만 조회하고, 사용자가 승인(Finance 탭에 반영)하거나
+// 무시(상태만 변경)할 수 있게 한다.
+//
+// [식별 방식] I열(Calendar Event ID)은 2026-07-30 이후 새로 기록되는 행부터 채워진다.
+// 그 이전에 쌓인 과거 행은 I열이 비어 있으므로, 그런 행은 시트상의 실제 행 번호(rowNumber)로
+// 식별한다. 프론트는 GET 응답의 각 항목에 담긴 rowNumber를 그대로 되돌려주기만 하면 되고,
+// eventId 유무를 신경 쓸 필요 없다 — resolve/dismiss 라우트가 내부적으로 rowNumber 기준으로
+// 처리한다(가장 안전 — 사이에 시트가 수동 편집되면 번호가 밀릴 수 있다는 점은 알려진 한계).
+// ============================================================================
+
+function parseSyncLogNeedsReview_(rows) {
+  const result = [];
+  for (let r = 2; r < rows.length; r++) { // 0,1행은 제목/헤더
+    const row = rows[r];
+    if (!row || !row[0]) continue;
+    const status = (row[7] || '').toString().trim();
+    if (status !== 'NEEDS_REVIEW') continue;
+    result.push({
+      rowNumber:  r + 1, // 시트상 실제 행 번호(1-indexed) — resolve/dismiss에 그대로 되돌려줌
+      timestamp:  (row[0] || '').toString().trim(),
+      source:     (row[1] || '').toString().trim(),
+      rawTitle:   (row[2] || '').toString().trim(),
+      parsedType: (row[3] || '').toString().trim(),
+      category:   (row[4] || '').toString().trim(),
+      amount:     parseFloat((row[5] || '0').toString().replace(/[$,\s]/g, '')) || 0,
+      eventId:    (row[8] || '').toString().trim(), // I열 — 과거 행은 빈 문자열
+    });
+  }
+  return result;
+}
+
+app.get('/api/me/finance/needs-review', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    if (!userEmail) return res.status(400).json({ error: 'NO_USER_EMAIL' });
+    const financeSheetId = await getFinanceSheetId_(userEmail);
+    const adminToken = await getRefreshTokenForEmail(FINANCE_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+    const logRes = await sheets.spreadsheets.values.get({ spreadsheetId: financeSheetId, range: 'Sync Log!A:I' });
+    const rows = logRes.data.values || [];
+    const items = parseSyncLogNeedsReview_(rows);
+    res.set('Cache-Control', 'no-store');
+    res.status(200).json({ items, count: items.length });
+  } catch (err) {
+    console.error('Error in /api/me/finance/needs-review:', err);
+    res.status(500).json({ error: 'NEEDS_REVIEW_FETCH_FAILED', message: err.message });
+  }
+});
+
+app.post('/api/me/finance/needs-review/resolve', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { rowNumber, tabName, amount, category, sublabel, notes, date } = req.body || {};
+    if (rowNumber === undefined) return res.status(400).json({ error: 'MISSING_ROW_NUMBER' });
+    const TAB_MAP  = { income: 'Income', expenses: 'Expenses', savings: 'Savings' };
+    const sheetTab = TAB_MAP[(tabName || '').toLowerCase()];
+    if (!sheetTab) return res.status(400).json({ error: 'INVALID_TAB_NAME' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    const financeSheetId = await getFinanceSheetId_(userEmail);
+    const adminToken = await getRefreshTokenForEmail(FINANCE_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+
+    // Sync Log에서 해당 행을 읽어와 원본 내용(제목/eventId) 확보
+    const logRes = await sheets.spreadsheets.values.get({ spreadsheetId: financeSheetId, range: `Sync Log!A${rowNumber}:I${rowNumber}` });
+    const logRow = (logRes.data.values || [])[0];
+    if (!logRow) return res.status(404).json({ error: 'ROW_NOT_FOUND' });
+    const eventId = (logRow[8] || '').toString().trim(); // I열 — 없을 수 있음(과거 행)
+
+    // 승인 → Finance 탭(Income/Expenses/Savings)에 새 행 append. writeFinanceRow_(Apps Script)와
+    // 동일한 컬럼 구조(A:Date | B:Amount | C:Category | D:Sub-label | E:vs Budget | F:Source | G:Notes | H:Event ID) 유지.
+    const rowDate = (date || '').toString().trim() || new Date().toISOString().slice(0, 10);
+    const financeRow = [
+      "'" + rowDate,
+      parseFloat(amount) || 0,
+      category || '',
+      sublabel || '',
+      '', // E: vs Budget — 기존 Apps Script처럼 VLOOKUP 수식은 여기선 생략(필요 시 후속 작업)
+      'Calendar',
+      notes || (logRow[2] || ''), // notes 미지정 시 Sync Log의 원본 제목을 그대로 사용
+      eventId,
+    ];
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: financeSheetId, range: `${sheetTab}!A1`,
+      valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [financeRow] },
+    });
+
+    // Sync Log 상태를 RESOLVED로 변경(H열), 실제 반영된 tab을 G열에 기록
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: financeSheetId,
+      requestBody: {
+        valueInputOption: 'USER_ENTERED',
+        data: [
+          { range: `Sync Log!G${rowNumber}`, values: [[sheetTab]] },
+          { range: `Sync Log!H${rowNumber}`, values: [['RESOLVED']] },
+        ],
+      },
+    });
+
+    res.status(200).json({ ok: true, rowNumber, tab: sheetTab });
+  } catch (err) {
+    console.error('Error in /api/me/finance/needs-review/resolve:', err);
+    res.status(500).json({ error: 'NEEDS_REVIEW_RESOLVE_FAILED', message: err.message });
+  }
+});
+
+app.post('/api/me/finance/needs-review/dismiss', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { rowNumber } = req.body || {};
+    if (rowNumber === undefined) return res.status(400).json({ error: 'MISSING_ROW_NUMBER' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    const financeSheetId = await getFinanceSheetId_(userEmail);
+    const adminToken = await getRefreshTokenForEmail(FINANCE_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+    // Finance 탭엔 아무것도 쓰지 않는다 — 상태만 DISMISSED로 변경(H열)
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: financeSheetId, range: `Sync Log!H${rowNumber}`,
+      valueInputOption: 'USER_ENTERED', requestBody: { values: [['DISMISSED']] },
+    });
+    res.status(200).json({ ok: true, rowNumber });
+  } catch (err) {
+    console.error('Error in /api/me/finance/needs-review/dismiss:', err);
+    res.status(500).json({ error: 'NEEDS_REVIEW_DISMISS_FAILED', message: err.message });
+  }
+});
+
+// ============================================================================
+// HEALTH API
+// rachel@kairoks.com 토큰으로 각 유저의 Health Sheet 읽기/쓰기
+// UserInfo Z열 (index 25) = Health_spreadsheetID
+// ============================================================================
+
+const HEALTH_ADMIN = 'rachel@kairoks.com';
+
+async function getHealthSheetId_(userEmail) {
+  const adminToken = await getRefreshTokenForEmail(HEALTH_ADMIN);
+  if (!adminToken) throw new Error('No admin refresh token');
+  const adminClient = createOAuth2Client(null);
+  adminClient.setCredentials({ refresh_token: adminToken });
+  const sheets = google.sheets({ version: 'v4', auth: adminClient });
+  const res  = await sheets.spreadsheets.values.get({ spreadsheetId: MASTER_SHEET_ID, range: 'UserInfo!A:Z' });
+  const rows = res.data.values || [];
+  for (let r = 1; r < rows.length; r++) {
+    const row      = rows[r];
+    const rowEmail = (row[2] || '').toString().trim().toLowerCase();
+    if (rowEmail === userEmail.toLowerCase()) {
+      const raw = (row[25] || '').toString().trim();
+      if (!raw) throw new Error(`Health Sheet ID not set for ${userEmail}`);
+      const m = raw.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+      return m ? m[1] : raw;
+    }
+  }
+  throw new Error(`User ${userEmail} not found in Master Sheet`);
+}
+
+function convertUnits_(data, tab) {
+  const d = { ...data };
+  if (tab === 'food') {
+    if (d.protein_g !== undefined) d.protein_oz = +(d.protein_g * 0.035274).toFixed(3);
+    if (d.carbs_g   !== undefined) d.carbs_oz   = +(d.carbs_g   * 0.035274).toFixed(3);
+    if (d.fat_g     !== undefined) d.fat_oz     = +(d.fat_g     * 0.035274).toFixed(3);
+    if (d.fiber_g   !== undefined) d.fiber_oz   = +(d.fiber_g   * 0.035274).toFixed(3);
+    if (d.protein_oz !== undefined && d.protein_g === undefined) d.protein_g = +(d.protein_oz / 0.035274).toFixed(1);
+    if (d.carbs_oz   !== undefined && d.carbs_g   === undefined) d.carbs_g   = +(d.carbs_oz   / 0.035274).toFixed(1);
+    if (d.fat_oz     !== undefined && d.fat_g     === undefined) d.fat_g     = +(d.fat_oz     / 0.035274).toFixed(1);
+    if (d.fiber_oz   !== undefined && d.fiber_g   === undefined) d.fiber_g   = +(d.fiber_oz   / 0.035274).toFixed(1);
+  }
+  if (tab === 'activity') {
+    if (d.weight_kg   !== undefined) d.weight_lb   = +(d.weight_kg   * 2.20462).toFixed(1);
+    if (d.distance_km !== undefined) d.distance_mi = +(d.distance_km * 0.621371).toFixed(2);
+    if (d.weight_lb   !== undefined && d.weight_kg   === undefined) d.weight_kg  = +(d.weight_lb  / 2.20462).toFixed(1);
+    if (d.distance_mi !== undefined && d.distance_km === undefined) d.distance_km = +(d.distance_mi / 0.621371).toFixed(2);
+  }
+  if (tab === 'health') {
+    if (d.weight_kg !== undefined) d.weight_lb = +(d.weight_kg * 2.20462).toFixed(1);
+    if (d.weight_lb !== undefined && d.weight_kg === undefined) d.weight_kg = +(d.weight_lb / 2.20462).toFixed(1);
+    if (d.height_cm !== undefined) { d.height_ft = Math.floor(d.height_cm / 30.48); d.height_in = +((d.height_cm / 2.54) % 12).toFixed(1); }
+    if (d.glucose_mgdl     !== undefined) d.glucose_mmol     = +(d.glucose_mgdl     / 18.0182).toFixed(1);
+    if (d.temperature_c    !== undefined) d.temperature_f    = +(d.temperature_c    * 9/5 + 32).toFixed(1);
+    if (d.temperature_f    !== undefined && d.temperature_c    === undefined) d.temperature_c    = +((d.temperature_f - 32) * 5/9).toFixed(1);
+    if (d.cholesterol_mgdl !== undefined) d.cholesterol_mmol = +(d.cholesterol_mgdl * 0.0259).toFixed(2);
+    if (d.cholesterol_mmol !== undefined && d.cholesterol_mgdl === undefined) d.cholesterol_mgdl = +(d.cholesterol_mmol / 0.0259).toFixed(0);
+    if (d.muscle_mass_kg   !== undefined) d.muscle_mass_lb   = +(d.muscle_mass_kg   * 2.20462).toFixed(1);
+    if (d.weight_kg !== undefined && d.height_cm !== undefined && d.sex) {
+      const sex = (d.sex || '').toLowerCase();
+      const leanMass = sex === 'male'
+        ? 0.407 * d.weight_kg + 0.267 * d.height_cm - 19.2
+        : 0.252 * d.weight_kg + 0.473 * d.height_cm - 48.3;
+      d.lean_mass_kg_boer = +leanMass.toFixed(1);
+      d.lean_mass_lb      = +(leanMass * 2.20462).toFixed(1);
+      if (d.manual_body_fat_pct !== undefined && d.manual_body_fat_pct !== '') {
+        d.body_fat_pct = +parseFloat(d.manual_body_fat_pct).toFixed(1);
+      } else {
+        d.body_fat_kg  = +(d.weight_kg - leanMass).toFixed(1);
+        d.body_fat_pct = +((d.weight_kg - leanMass) / d.weight_kg * 100).toFixed(1);
+      }
+      if (d.manual_muscle_mass_kg !== undefined && d.manual_muscle_mass_kg !== '') {
+        d.muscle_mass_kg = +parseFloat(d.manual_muscle_mass_kg).toFixed(1);
+        d.muscle_mass_lb = +(d.muscle_mass_kg * 2.20462).toFixed(1);
+      } else {
+        const ratio = sex === 'male' ? 0.45 : 0.30;
+        d.muscle_mass_kg = +(d.weight_kg * ratio).toFixed(1);
+        d.muscle_mass_lb = +(d.muscle_mass_kg * 2.20462).toFixed(1);
+      }
+      const hm = d.height_cm / 100;
+      d.bmi = +(d.weight_kg / (hm * hm)).toFixed(1);
+    }
+  }
+  // [v4.0] water 단위 변환
+  if (tab === 'water') {
+    if (d.amount_ml !== undefined) d.amount_floz = +(d.amount_ml * 0.033814).toFixed(1);
+    if (d.amount_floz !== undefined && d.amount_ml === undefined) d.amount_ml = +(d.amount_floz / 0.033814).toFixed(0);
+  }
+  return d;
+}
+
+function calcActivityCalories_(met, weightKg, durationMin) {
+  if (!met || !weightKg || !durationMin) return null;
+  return +((met * weightKg * durationMin / 60)).toFixed(0);
+}
+
+function matchesPeriod_(dateRaw, targetDate, period) {
+  const d = dateRaw.substring(0, 10);
+  if (period === 'daily')   return d === targetDate;
+  if (period === 'weekly')  { const diff = (new Date(targetDate) - new Date(d)) / (1000*60*60*24); return diff >= 0 && diff < 7; }
+  if (period === 'monthly') return d.substring(0, 7) === targetDate.substring(0, 7);
+  if (period === 'yearly')  return d.substring(0, 4) === targetDate.substring(0, 4); // [신규] Women's History의 Monthly/Yearly/All에 쓰임
+  if (period === 'all')     return true; // [v4.1] 전체 이력 조회용 — 명시적 지원 표시(동작은 기존 fallback과 동일)
+  return true;
+}
+
+// ============================================================================
+// parseHealthRows_ — 탭별 시트 데이터 파싱
+// [v4.0] health(Body) 27col, sleep add_to_calendar, mood energy_level_1to5,
+//        water, medication, womens, womens_bp, womens_mood, pregnancy 탭 추가
+// ============================================================================
+function parseHealthRows_(rows, tabName, targetDate, period) {
+  const result = [];
+  for (let r = 3; r < rows.length; r++) {
+    const row = rows[r];
+    if (!row || !row[0]) continue;
+    const dateRaw = (row[0] || '').toString().trim();
+    if (!dateRaw || dateRaw.length < 10) continue;
+    if (!matchesPeriod_(dateRaw, targetDate, period)) continue;
+    const entry = { _sheet_row: r + 1, stamp_date: dateRaw };
+
+    if (tabName === 'food') {
+      entry.meal_time     = (row[1]  || '').toString().trim();
+      entry.food_name     = (row[2]  || '').toString().trim();
+      entry.calories_kcal = parseFloat((row[3]  || '0').toString().replace(/[,$\s]/g,'')) || 0;
+      entry.protein_g  = parseFloat(row[4])  || 0; entry.protein_oz = parseFloat(row[5])  || 0;
+      entry.carbs_g    = parseFloat(row[6])  || 0; entry.carbs_oz   = parseFloat(row[7])  || 0;
+      entry.fat_g      = parseFloat(row[8])  || 0; entry.fat_oz     = parseFloat(row[9])  || 0;
+      entry.fiber_g    = parseFloat(row[10]) || 0; entry.fiber_oz   = parseFloat(row[11]) || 0;
+      entry.source     = (row[12] || 'Manual').toString().trim();
+      entry.notes      = (row[13] || '').toString().trim();
+      entry.unit_pref  = (row[14] || 'metric').toString().trim();
+
+    } else if (tabName === 'activity') {
+      // [v4.1] 컬럼 순서 수정 — 실제 Activity 시트 헤더(A:stamp_date B:category C:type
+      // D:duration_min E:sets F:reps G:weight_per_set_kg H:distance_km I:steps
+      // J:calories_burned_kcal K:met_value L:add_to_calendar M:unit_pref N:notes, 14컬럼)를
+      // 기준으로 재정렬함. 기존 코드는 sets/reps/weight_kg/weight_lb가 duration_min보다
+      // 먼저 오고 distance_mi 컬럼이 별도로 있는 16컬럼 레이아웃을 가정했으나, 실제 시트는
+      // duration_min이 두 번째(D열)에 오고 weight는 kg 단일 컬럼, distance_mi 컬럼은 아예
+      // 없음 — 이 불일치 때문에 steps 값이 "distance"로, calories 값이 "distance_mi"로
+      // 표시되는 등 프론트 Activity Entry 화면 전체가 밀려서 잘못 표시되고 있었음
+      // (2026-07-24 실제 시트 스크린샷 대조로 확인됨).
+      entry.category             = (row[1]  || '').toString().trim();
+      entry.type                 = (row[2]  || '').toString().trim();
+      entry.duration_min         = parseFloat(row[3])  || null;
+      entry.sets                 = parseInt(row[4])    || null;
+      entry.reps                 = parseInt(row[5])    || null;
+      entry.weight_per_set_kg    = parseFloat(row[6])  || null;
+      entry.distance_km          = parseFloat(row[7])  || null;
+      entry.steps                = parseInt(row[8])    || null;
+      entry.calories_burned_kcal = parseFloat(row[9])  || null;
+      entry.met_value            = parseFloat(row[10]) || null;
+      entry.add_to_calendar      = (row[11] || '').toString().trim();
+      entry.unit_pref            = (row[12] || 'metric').toString().trim();
+      entry.notes                = (row[13] || '').toString().trim();
+
+    } else if (tabName === 'health') {
+      // [v4.0] Body 탭 — 27컬럼 (col 0=date … col 26=unit_pref)
+      // custom_item_name(24), custom_item_value(25), custom_item_unit(26) 추가
+      entry.weight_kg             = parseFloat(row[1])  || null; entry.weight_lb          = parseFloat(row[2])  || null;
+      entry.bmi                   = parseFloat(row[3])  || null;
+      entry.lean_mass_kg_boer     = parseFloat(row[4])  || null; entry.lean_mass_lb       = parseFloat(row[5])  || null;
+      entry.body_fat_kg           = parseFloat(row[6])  || null; entry.body_fat_pct       = parseFloat(row[7])  || null;
+      entry.muscle_mass_kg        = parseFloat(row[8])  || null; entry.muscle_mass_lb     = parseFloat(row[9])  || null;
+      entry.manual_body_fat_pct   = (row[10] || '').toString().trim();
+      entry.manual_muscle_mass_kg = (row[11] || '').toString().trim();
+      entry.blood_pressure_sys    = parseFloat(row[12]) || null; entry.blood_pressure_dia = parseFloat(row[13]) || null;
+      entry.heart_rate_bpm        = parseFloat(row[14]) || null; entry.spo2_pct           = parseFloat(row[15]) || null;
+      entry.glucose_mgdl          = parseFloat(row[16]) || null; entry.glucose_mmol       = parseFloat(row[17]) || null;
+      entry.temperature_c         = parseFloat(row[18]) || null; entry.temperature_f      = parseFloat(row[19]) || null;
+      entry.cholesterol_mgdl      = parseFloat(row[20]) || null; entry.cholesterol_mmol   = parseFloat(row[21]) || null;
+      entry.notes                 = (row[22] || '').toString().trim();
+      entry.unit_pref             = (row[23] || 'metric').toString().trim();
+      entry.custom_item_name      = (row[24] || '').toString().trim(); // [v4.0]
+      entry.custom_item_value     = (row[25] || '').toString().trim(); // [v4.0]
+      entry.custom_item_unit      = (row[26] || '').toString().trim(); // [v4.0]
+
+    } else if (tabName === 'sleep') {
+      entry.bedtime         = (row[1] || '').toString().trim(); entry.wake_time  = (row[2] || '').toString().trim();
+      entry.duration_min    = parseFloat(row[3]) || null;       entry.duration_hr = parseFloat(row[4]) || null;
+      entry.quality_1to5    = parseInt(row[5])   || null;
+      entry.notes           = (row[6] || '').toString().trim();
+      entry.unit_pref       = (row[7] || 'metric').toString().trim();
+      entry.add_to_calendar = (row[8] || '').toString().trim(); // [v4.0]
+
+    } else if (tabName === 'mood') {
+      entry.mood              = (row[1] || '').toString().trim();
+      entry.energy_level_1to5 = parseInt(row[2]) || null;       // [v4.0] energy_level → energy_level_1to5
+      entry.notes             = (row[3] || '').toString().trim();
+      entry.unit_pref         = (row[4] || 'metric').toString().trim();
+      entry.add_to_calendar   = (row[5] || '').toString().trim(); // [v4.0]
+
+    } else if (tabName === 'custom') {
+      entry.item_name = (row[1] || '').toString().trim();
+      entry.value     = (row[2] || '').toString().trim();
+      entry.unit      = (row[3] || '').toString().trim();
+      entry.notes     = (row[4] || '').toString().trim();
+
+    } else if (tabName === 'water') {
+      // [v4.0] T-Water: 8컬럼
+      entry.amount_ml   = parseFloat(row[1]) || null;
+      entry.amount_floz = parseFloat(row[2]) || null;
+      entry.drink_type  = (row[3] || '').toString().trim();
+      entry.time_of_day = (row[4] || '').toString().trim();
+      entry.goal_ml     = parseFloat(row[5]) || null;
+      entry.cumulative_ml = parseFloat(row[6]) || null;
+      entry.notes       = (row[7] || '').toString().trim();
+
+    } else if (tabName === 'medication') {
+      // [v4.0] T-Medication: 케이스B(복약체크) — 기존 행 update
+      entry.med_name      = (row[1] || '').toString().trim();
+      entry.dose          = (row[2] || '').toString().trim();
+      entry.unit          = (row[3] || '').toString().trim();
+      entry.frequency     = (row[4] || '').toString().trim();
+      entry.time_of_day   = (row[5] || '').toString().trim();
+      entry.taken         = (row[6] || '').toString().trim();   // Y/N
+      entry.taken_at      = (row[7] || '').toString().trim();
+      entry.notes         = (row[8] || '').toString().trim();
+
+    } else if (tabName === 'womens') {
+      // [v4.1] Women 탭 — 실제 시트 헤더(A~AG, 33컬럼) 순서에 맞춰 재작성.
+      // buildHealthRow_의 [v4.1] 수정과 동일한 컬럼 순서를 사용함(쓰기/읽기 일치).
+      entry.mode                        = (row[1]  || '').toString().trim();
+      entry.period_start                = (row[2]  || '').toString().trim();
+      entry.period_end                  = (row[3]  || '').toString().trim();
+      entry.ovulation                   = (row[4]  || '').toString().trim();
+      entry.ov_test_result              = (row[5]  || '').toString().trim();
+      entry.ov_test_time                = (row[6]  || '').toString().trim();
+      entry.preg_test_result            = (row[7]  || '').toString().trim();
+      entry.preg_test_time              = (row[8]  || '').toString().trim();
+      entry.cervical_mucus_feeling      = (row[9]  || '').toString().trim();
+      entry.cervical_mucus_color        = (row[10] || '').toString().trim();
+      entry.cervical_mucus_type         = (row[11] || '').toString().trim();
+      entry.symptoms                    = (row[12] || '').toString().trim();
+      entry.symptom_severity            = (row[13] || '').toString().trim();
+      entry.medications                 = (row[14] || '').toString().trim();
+      entry.sex_count                   = (row[15] || '').toString().trim();
+      entry.condom                      = (row[16] || '').toString().trim();
+      entry.orgasm_count                = (row[17] || '').toString().trim();
+      entry.masturbation_count          = (row[18] || '').toString().trim();
+      entry.sex_time                    = (row[19] || '').toString().trim();
+      entry.morning_sickness_count      = (row[20] || '').toString().trim();
+      entry.morning_sickness_severity   = (row[21] || '').toString().trim();
+      entry.morning_sickness_note       = (row[22] || '').toString().trim();
+      entry.clinic_visit_type           = (row[23] || '').toString().trim();
+      entry.clinic_visit_note           = (row[24] || '').toString().trim();
+      entry.clinic_next_appointment     = (row[25] || '').toString().trim();
+      entry.bp_sys                      = (row[26] || '').toString().trim();
+      entry.bp_dia                      = (row[27] || '').toString().trim();
+      entry.mood                        = (row[28] || '').toString().trim();
+      entry.energy_level                = (row[29] || '').toString().trim();
+      entry.add_to_calendar             = (row[30] || '').toString().trim();
+      entry.note                        = (row[31] || '').toString().trim();
+      entry.unit_pref                   = (row[32] || 'metric').toString().trim();
+      entry.calendar_event_id           = (row[33] || '').toString().trim(); // [v4.6] AH
+
+    } else if (tabName === 'womens_bp') {
+      // [v4.2] Women_BP 탭 — 실제 시트 헤더(stamp_date, bp_sys, bp_dia, notes, source) 5컬럼
+      entry.bp_sys  = parseFloat(row[1]) || null;
+      entry.bp_dia  = parseFloat(row[2]) || null;
+      entry.notes   = (row[3] || '').toString().trim();
+      entry.source  = (row[4] || '').toString().trim();
+
+    } else if (tabName === 'womens_mood') {
+      // [v4.2] Women_Mood 탭 — 실제 시트 헤더(stamp_date, mood, energy_level_1to5, notes, source) 5컬럼
+      entry.mood         = (row[1] || '').toString().trim();
+      entry.energy_level = parseInt(row[2]) || null;
+      entry.notes         = (row[3] || '').toString().trim();
+      entry.source        = (row[4] || '').toString().trim();
+
+    } else if (tabName === 'fetal_movement' || tabName === 'baby_kick') {
+      // [v4.0] Pregnancy 탭 — entry_type으로 구분
+      entry.entry_type      = (row[1] || '').toString().trim();  // fetal_movement | baby_kick
+      entry.kick_count      = parseInt(row[2])  || null;
+      entry.session_min     = parseFloat(row[3]) || null;
+      entry.time_of_day     = (row[4] || '').toString().trim();
+      entry.intensity       = (row[5] || '').toString().trim();
+      entry.pregnancy_week  = parseInt(row[6])  || null;
+      entry.notes           = (row[7] || '').toString().trim();
+    }
+
+    result.push(entry);
+  }
+  return result;
+}
+
+function buildHealthSummary_(food, activity, health, sleep, mood) {
+  return {
+    total_calories_kcal:        food.reduce((s, r) => s + (r.calories_kcal || 0), 0),
+    total_protein_g:            +food.reduce((s, r) => s + (r.protein_g || 0), 0).toFixed(1),
+    total_carbs_g:              +food.reduce((s, r) => s + (r.carbs_g   || 0), 0).toFixed(1),
+    total_fat_g:                +food.reduce((s, r) => s + (r.fat_g     || 0), 0).toFixed(1),
+    total_fiber_g:              +food.reduce((s, r) => s + (r.fiber_g   || 0), 0).toFixed(1),
+    total_calories_burned_kcal: activity.reduce((s, r) => s + (r.calories_burned_kcal || 0), 0),
+    total_steps:                activity.reduce((s, r) => s + (r.steps || 0), 0),
+    total_distance_km:          +activity.reduce((s, r) => s + (r.distance_km || 0), 0).toFixed(2),
+    latest_weight_kg:    health.length ? health[health.length - 1].weight_kg    : null,
+    latest_bmi:          health.length ? health[health.length - 1].bmi          : null,
+    latest_body_fat_pct: health.length ? health[health.length - 1].body_fat_pct : null,
+    sleep_duration_min:  sleep.length  ? sleep[sleep.length - 1].duration_min   : null,
+    sleep_quality:       sleep.length  ? sleep[sleep.length - 1].quality_1to5   : null,
+    mood:                mood.length   ? mood[mood.length - 1].mood             : null,
+    energy_level:        mood.length   ? mood[mood.length - 1].energy_level_1to5 : null,
+  };
+}
+
+// [신규] weekly/monthly 조회용 평균 분석. buildHealthSummary_는 (지난 수정으로)
+// 항상 targetDate 하루치만 반영하도록 고정했으니, 기간 전체를 분석하고 싶을 때
+// 쓸 곳이 없어졌다 — 그 자리를 메우는 함수. "합계"가 아니라 "평균"을 낸다는 게
+// 핵심이다: 예전 buildHealthSummary_(period=monthly)는 그 달 30일치를 그냥 다
+// 더한 값을 "요약"이라고 반환해서, 예를 들어 total_steps가 30만보처럼 나와도
+// 하루 평균인지 한 달 합계인지 필드명만 봐선 알 수 없었다. 이 함수는 그 문제를
+// "평균"이라는 이름표를 붙여 명확히 분리해서 다시 제공한다.
+//
+// 평균의 분모(일수)는 "그 항목이 실제로 기록된 날짜 수"로 잡는다(기간 전체 일수가
+// 아니라) — 기록 안 한 날을 0으로 계산에 섞으면 평균이 실제보다 낮게 나오는
+// 문제가 생기기 때문. 체중/BMI/체지방률/수면은 "그 항목의 마지막 값"이 아니라
+// 기간 내 모든 개별 기록값의 평균을 낸다(latest_* 대신 avg_*). mood는 숫자가
+// 아니라 범주형이라 평균이 성립하지 않으므로, 기간 내 가장 많이 기록된
+// mood(최빈값)를 대신 반환한다.
+function countDistinctDates_(arr) {
+  const seen = {};
+  arr.forEach(r => { const d = (r.stamp_date || '').toString().slice(0, 10); if (d) seen[d] = true; });
+  return Object.keys(seen).length;
+}
+function avgPerDay_(sum, days) { return days ? +(sum / days).toFixed(1) : null; }
+function avgOfField_(arr, field) {
+  const vals = arr.map(r => r[field]).filter(v => v !== null && v !== undefined && !isNaN(v));
+  if (!vals.length) return null;
+  return +(vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(1);
+}
+function buildHealthPeriodAverage_(food, activity, health, sleep, mood) {
+  const foodDays     = countDistinctDates_(food);
+  const activityDays = countDistinctDates_(activity);
+
+  const totalCal     = food.reduce((s, r) => s + (r.calories_kcal || 0), 0);
+  const totalProtein = food.reduce((s, r) => s + (r.protein_g   || 0), 0);
+  const totalCarbs   = food.reduce((s, r) => s + (r.carbs_g     || 0), 0);
+  const totalFat     = food.reduce((s, r) => s + (r.fat_g       || 0), 0);
+  const totalFiber   = food.reduce((s, r) => s + (r.fiber_g     || 0), 0);
+  const totalBurned  = activity.reduce((s, r) => s + (r.calories_burned_kcal || 0), 0);
+  const totalSteps   = activity.reduce((s, r) => s + (r.steps          || 0), 0);
+  const totalDist    = activity.reduce((s, r) => s + (r.distance_km    || 0), 0);
+
+  const moodCounts = {};
+  mood.forEach(r => { if (r.mood) moodCounts[r.mood] = (moodCounts[r.mood] || 0) + 1; });
+  let mostFrequentMood = null, topCount = 0;
+  Object.keys(moodCounts).forEach(k => { if (moodCounts[k] > topCount) { topCount = moodCounts[k]; mostFrequentMood = k; } });
+
+  return {
+    days_with_food_log:               foodDays,
+    avg_calories_kcal_per_day:        avgPerDay_(totalCal,    foodDays),
+    avg_protein_g_per_day:            avgPerDay_(totalProtein, foodDays),
+    avg_carbs_g_per_day:              avgPerDay_(totalCarbs,   foodDays),
+    avg_fat_g_per_day:                avgPerDay_(totalFat,     foodDays),
+    avg_fiber_g_per_day:              avgPerDay_(totalFiber,   foodDays),
+    days_with_activity_log:           activityDays,
+    avg_calories_burned_kcal_per_day: avgPerDay_(totalBurned, activityDays),
+    avg_steps_per_day:                avgPerDay_(totalSteps,  activityDays),
+    avg_distance_km_per_day:          avgPerDay_(totalDist,   activityDays),
+    avg_weight_kg:                    avgOfField_(health, 'weight_kg'),
+    avg_bmi:                          avgOfField_(health, 'bmi'),
+    avg_body_fat_pct:                 avgOfField_(health, 'body_fat_pct'),
+    avg_sleep_duration_min:           avgOfField_(sleep, 'duration_min'),
+    avg_sleep_quality:                avgOfField_(sleep, 'quality_1to5'),
+    most_frequent_mood:               mostFrequentMood,
+  };
+}
+
+// ============================================================================
+// parseHealthBaseline_ — Baseline 시트 파싱
+// [v4.0] dob 컬럼 추가 (col 16) → 총 17컬럼 (0-16)
+// ============================================================================
+function parseHealthBaseline_(rows) {
+  let latest = null;
+  for (let r = 3; r < rows.length; r++) {
+    const row = rows[r]; if (!row || !row[0]) continue;
+    const dateRaw = (row[0] || '').toString().trim(); if (!dateRaw) continue;
+    // [v4.1] 컬럼 순서 수정 — 실제 시트 헤더(A:recorded_date B:dob C:sex D:age E:height_cm
+    // F:height_ft G:height_in H:weight_kg I:weight_lb ...)를 기준으로 재정렬함.
+    // 기존 코드는 dob이 Q열(마지막)에 있다고 가정했으나 실제로는 B열(2번째)에 있어
+    // sex 이후 전 필드가 한 칸씩 밀려 잘못 읽히고 있었음(2026-07-24 CSV 대조로 확인).
+    latest = {
+      recorded_date:  dateRaw,
+      dob:            (row[1]  || '').toString().trim(),
+      sex:            (row[2]  || '').toString().trim(),
+      age:            parseInt(row[3])   || null,
+      height_cm:      parseFloat(row[4]) || null,
+      height_ft:      parseFloat(row[5]) || null,
+      height_in:      parseFloat(row[6]) || null,
+      weight_kg:      parseFloat(row[7]) || null,
+      weight_lb:      parseFloat(row[8]) || null,
+      blood_type:     (row[9]  || '').toString().trim(),
+      allergies:      (row[10] || '').toString().trim(),
+      emergency_contact: (row[11] || '').toString().trim(),
+      activity_level: parseFloat(row[12]) || 1.55,
+      activity_label: (row[13] || '').toString().trim(),
+      bmr_kcal:       parseFloat(row[14]) || null,
+      tdee_kcal:      parseFloat(row[15]) || null,
+      unit_pref:      (row[16] || 'metric').toString().trim(),
+    };
+  }
+  return latest;
+}
+
+function parseHealthGoal_(rows) {
+  let latest = null;
+  for (let r = 3; r < rows.length; r++) {
+    const row = rows[r]; if (!row || !row[0]) continue;
+    const dateRaw = (row[0] || '').toString().trim(); if (!dateRaw) continue;
+    latest = {
+      recorded_date: dateRaw, goal_type: (row[1] || 'maintain').toString().trim(),
+      target_weight_kg: parseFloat(row[2]) || null, target_weight_lb: parseFloat(row[3]) || null,
+      duration_months: parseFloat(row[4]) || null,
+      daily_calorie_intake_kcal: parseFloat(row[5]) || null, daily_exercise_cal_kcal: parseFloat(row[6]) || null,
+      weekly_pace_kg: parseFloat(row[7]) || null, weekly_pace_lb: parseFloat(row[8]) || null,
+      water_goal_ml: parseFloat(row[9]) || null, water_goal_oz: parseFloat(row[10]) || null,
+      sleep_goal_min: parseFloat(row[11]) || null, sleep_goal_hr: parseFloat(row[12]) || null,
+      notes: (row[13] || '').toString().trim(),
+    };
+  }
+  return latest;
+}
+
+// ============================================================================
+// HEALTH_TAB_MAP
+// [v4.0] health→Body, custom→T-Custom, + water/medication/womens/womens_bp/
+//         womens_mood/fetal_movement/baby_kick 추가
+// ============================================================================
+const HEALTH_TAB_MAP = {
+  food:            'Food',
+  activity:        'Activity',
+  health:          'Body',         // [v4.0] 'Health' → 'Body'
+  sleep:           'Sleep',
+  mood:            'Mood',
+  baseline:        'Baseline',
+  goal:            'Goal',
+  custom:          'T-Custom',     // [v4.0] 'Custom' → 'T-Custom'
+  water:           'T-Water',      // [v4.0] 신규
+  medication:      'T-Medication', // [v4.0] 신규
+  womens:          'Women',        // [v4.0] 신규
+  womens_bp:       'Women_BP',     // [v4.0] 신규
+  womens_mood:     'Women_Mood',   // [v4.0] 신규
+  fetal_movement:  'Pregnancy',    // [v4.0] 신규
+  baby_kick:       'Pregnancy',    // [v4.0] 신규 (same sheet, entry_type 구분)
+};
+
+// ============================================================================
+// buildHealthRow_ — 탭별 시트 행 생성
+// [v4.0] Body 27col, activity add_to_calendar, sleep add_to_calendar,
+//        mood energy_level_1to5 + add_to_calendar, baseline dob (17col),
+//        water / medication / womens / womens_bp / womens_mood / pregnancy 신규
+// ============================================================================
+function buildHealthRow_(tab, data) {
+  const d = data;
+  const stamp = d.stamp_date || new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const date  = d.stamp_date || new Date().toISOString().slice(0, 10);
+
+  if (tab === 'food') {
+    return [ stamp, d.meal_time || 'AM', d.food_name || '', d.calories_kcal || 0,
+      d.protein_g || 0, d.protein_oz || 0, d.carbs_g || 0, d.carbs_oz || 0,
+      d.fat_g || 0, d.fat_oz || 0, d.fiber_g || 0, d.fiber_oz || 0,
+      d.source || 'Manual', d.notes || '', d.unit_pref || 'metric' ];
+  }
+
+  if (tab === 'activity') {
+    // [v4.1] 컬럼 순서 수정 — 실제 Activity 시트 헤더 순서(A:stamp_date B:category C:type
+    // D:duration_min E:sets F:reps G:weight_per_set_kg H:distance_km I:steps
+    // J:calories_burned_kcal K:met_value L:add_to_calendar M:unit_pref N:notes)에 맞춤.
+    // 기존엔 sets/reps/weight를 duration_min보다 먼저, distance_mi라는 존재하지 않는
+    // 컬럼까지 포함한 16컬럼으로 썼음 — parseHealthRows_와 동일한 원인의 버그.
+    return [ stamp, d.category || '', d.type || '',
+      d.duration_min || '', d.sets || '', d.reps || '',
+      d.weight_per_set_kg || d.weight_kg || '',
+      d.distance_km || '', d.steps || '',
+      d.calories_burned_kcal || '', d.met_value || '',
+      d.add_to_calendar || '', d.unit_pref || 'metric', d.notes || '' ];
+  }
+
+  if (tab === 'health') {
+    // [v4.0] Body 탭 — 27컬럼 (col 24-26: custom_item_*)
+    return [ date,
+      d.weight_kg || '', d.weight_lb || '', d.bmi || '',
+      d.lean_mass_kg_boer || '', d.lean_mass_lb || '',
+      d.body_fat_kg || '', d.body_fat_pct || '',
+      d.muscle_mass_kg || '', d.muscle_mass_lb || '',
+      d.manual_body_fat_pct || '', d.manual_muscle_mass_kg || '',
+      d.blood_pressure_sys || '', d.blood_pressure_dia || '',
+      d.heart_rate_bpm || '', d.spo2_pct || '',
+      d.glucose_mgdl || '', d.glucose_mmol || '',
+      d.temperature_c || '', d.temperature_f || '',
+      d.cholesterol_mgdl || '', d.cholesterol_mmol || '',
+      d.notes || '', d.unit_pref || 'metric',
+      d.custom_item_name || '', d.custom_item_value || '', d.custom_item_unit || '' ];
+  }
+
+  if (tab === 'sleep') {
+    // [v4.0] add_to_calendar 추가 (col 8)
+    return [ date, d.bedtime || '', d.wake_time || '',
+      d.duration_min || '', d.duration_hr || '', d.quality_1to5 || '',
+      d.notes || '', d.unit_pref || 'metric', d.add_to_calendar || '' ];
+  }
+
+  if (tab === 'mood') {
+    // [v4.0] energy_level_1to5 (v3.8: energy_level), add_to_calendar 추가 (col 5)
+    return [ date, d.mood || '', d.energy_level_1to5 || d.energy_level || '',
+      d.notes || '', d.unit_pref || 'metric', d.add_to_calendar || '' ];
+  }
+
+  if (tab === 'custom') {
+    return [ date, d.item_name || '', d.value || '', d.unit || '', d.notes || '' ];
+  }
+
+  if (tab === 'baseline') {
+    // [v4.1] 컬럼 순서 수정 — 실제 시트 헤더 순서(A:recorded_date B:dob C:sex D:age E:height_cm...)에
+    // 맞춰 dob을 두 번째 자리로 이동. 기존엔 마지막(Q열)에 썼으나 실제 헤더는 B열이라
+    // 저장할 때마다 전체 컬럼이 한 칸씩 밀려 기록되고 있었음.
+    return [ d.recorded_date || date,
+      d.dob || '',
+      d.sex || '', d.age || '',
+      d.height_cm || '', d.height_ft || '', d.height_in || '',
+      d.weight_kg || '', d.weight_lb || '',
+      d.blood_type || '', d.allergies || '', d.emergency_contact || '',
+      d.activity_level || 1.55, d.activity_label || '',
+      d.bmr_kcal || '', d.tdee_kcal || '',
+      d.unit_pref || 'metric' ];
+  }
+
+  if (tab === 'goal') {
+    return [ d.recorded_date || date, d.goal_type || 'maintain',
+      d.target_weight_kg || '', d.target_weight_lb || '',
+      d.duration_months || '',
+      d.daily_calorie_intake_kcal || '', d.daily_exercise_cal_kcal || '',
+      d.weekly_pace_kg || '', d.weekly_pace_lb || '',
+      d.water_goal_ml || '', d.water_goal_oz || '',
+      d.sleep_goal_min || '', d.sleep_goal_hr || '', d.notes || '' ];
+  }
+
+  if (tab === 'water') {
+    // [v4.0] T-Water — 8컬럼
+    return [ stamp, d.amount_ml || '', d.amount_floz || '',
+      d.drink_type || 'water', d.time_of_day || '',
+      d.goal_ml || '', d.cumulative_ml || '', d.notes || '' ];
+  }
+
+  if (tab === 'medication') {
+    // [v4.0] T-Medication — 케이스B(복약체크): 기존 행 update
+    // 9컬럼: date | med_name | dose | unit | frequency | time_of_day | taken | taken_at | notes
+    return [ date, d.med_name || '', d.dose || '', d.unit || '',
+      d.frequency || '', d.time_of_day || '',
+      d.taken || 'N', d.taken_at || stamp, d.notes || '' ];
+  }
+
+  if (tab === 'womens') {
+    // [v4.3] Women 탭 — 33컬럼 전체를 프론트(panel-logs-womens_3_.html)가 보내는
+    // 중첩 객체에서 평탄화해서 채움. 프론트는 팝업을 저장할 때마다 그날의 전체
+    // state.dayData를 통째로 보내므로, 여기서 꺼내 쓰기만 하면 됨(추가 API 호출 없음).
+    const symArr = Array.isArray(d.symptoms) ? d.symptoms : [];
+    const medArr = Array.isArray(d.medications) ? d.medications : [];
+    const cm  = d.cervical_mucus  || {};
+    const ovt = d.ovulation_test  || {};
+    const pgt = d.pregnancy_test  || {};
+    const sex = d.sex             || {};
+    const ms  = d.morning_sickness || {};
+    const cv  = d.clinic_visit    || {};
+    const bp  = d.blood_pressure  || {};
+    const wm  = d.womens_mood     || {};
+
+    return [ date,                                          // A stamp_date
+      d.mode || '',                                          // B mode
+      d.period_start || '',                                  // C period_start
+      d.period_end || '',                                    // D period_end
+      d.ovulation || '',                                      // E ovulation
+      ovt.result || '', ovt.time || '',                       // F ov_test_result, G ov_test_time
+      pgt.result || '', pgt.time || '',                       // H preg_test_result, I preg_test_time
+      cm.feeling || '', cm.color || '', cm.type || '',        // J~L cervical_mucus_feeling/color/type
+      symArr.map(s => s.name).join(', '),                     // M symptoms
+      symArr.map(s => `${s.name}:${s.severity}`).join(', '),  // N symptom_severity ("이름:점수" 형식)
+      medArr.map(m => `${m.name}(${m.taken ? '복용' : '미복용'})`).join(', '), // O medications
+      sex.count ?? '',                                         // P sex_count
+      (sex.condom === true || sex.condom === false) ? sex.condom : '', // Q condom
+      sex.orgasm_count ?? '',                                  // R orgasm_count
+      sex.masturbation_count ?? '',                            // S masturbation_count
+      sex.time || '',                                          // T sex_time
+      ms.count ?? '', ms.severity || '', ms.note || '',        // U~W morning_sickness_count/severity/note
+      cv.type || '', cv.note || '', cv.next_appointment || '', // X~Z clinic_visit_type/note, clinic_next_appointment
+      bp.systolic ?? '', bp.diastolic ?? '',                   // AA bp_sys, AB bp_dia
+      wm.mood || '', wm.energy_level ?? '',                    // AC mood, AD energy_level
+      d.add_to_calendar || '',                                 // AE add_to_calendar
+      d.note || '',                                            // AF note (프론트 필드명이 note(단수)라 수정함)
+      d.unit_pref || 'metric',                                  // AG unit_pref
+      d.calendar_event_id || '' ];                              // AH calendar_event_id [v4.6]
+  }
+
+  if (tab === 'womens_bp') {
+    // [v4.2] Women_BP 탭 — 실제 시트 헤더(stamp_date, bp_sys, bp_dia, notes, source) 5컬럼.
+    // 프론트(panel-logs-womens_3_.html)가 이미 이 필드명 그대로 보내고 있음(bp_sys/bp_dia/notes/source).
+    return [ date, d.bp_sys || '', d.bp_dia || '', d.notes || '', d.source || 'womens' ];
+  }
+
+  if (tab === 'womens_mood') {
+    // [v4.2] Women_Mood 탭 — 실제 시트 헤더(stamp_date, mood, energy_level_1to5, notes, source) 5컬럼.
+    // 프론트가 이미 이 필드명 그대로 보내고 있음(mood/energy_level/notes/source).
+    return [ date, d.mood || '', d.energy_level || '', d.notes || '', d.source || 'womens' ];
+  }
+
+  if (tab === 'fetal_movement' || tab === 'baby_kick') {
+    // [v4.0] Pregnancy 탭 — entry_type으로 구분 — 8컬럼
+    return [ date, d.entry_type || tab, d.kick_count || '',
+      d.session_min || '', d.time_of_day || '',
+      d.intensity || '', d.pregnancy_week || '', d.notes || '' ];
+  }
+
+  return [];
+}
+
+// ============================================================================
+// buildHealthEventTitle_ — add_to_calendar='Y'일 때 만들 캘린더 이벤트 제목
+// 탭마다 필드가 달라서 탭별로 대표값을 뽑아 제목을 구성한다.
+// ============================================================================
+function buildHealthEventTitle_(tab, d) {
+  switch (tab) {
+    case 'food':           return `🍽️ ${d.food_name || 'Food'}${d.calories_kcal ? ` (${d.calories_kcal}kcal)` : ''}`;
+    case 'activity':       return `🏃 ${d.type || d.category || 'Activity'}${d.duration_min ? ` ${d.duration_min}min` : ''}`;
+    case 'health':         return `❤️ Body log${d.weight_kg ? ` - ${d.weight_kg}kg` : (d.weight_lb ? ` - ${d.weight_lb}lb` : '')}`;
+    case 'sleep':          return `😴 Sleep${d.duration_hr ? ` ${d.duration_hr}hr` : ''}`;
+    case 'mood':           return `🙂 Mood${d.mood ? `: ${d.mood}` : ''}`;
+    case 'custom':         return `📝 ${d.item_name || 'Custom'}${d.value ? ` - ${d.value}${d.unit || ''}` : ''}`;
+    case 'water':          return `💧 Water${(d.amount_ml || d.amount_floz) ? ` ${d.amount_ml || d.amount_floz}${d.amount_ml ? 'ml' : 'fl oz'}` : ''}`;
+    case 'medication':     return `💊 ${d.med_name || 'Medication'}`;
+    case 'womens':         return `Women's health log`;
+    case 'womens_bp':      return `Women's BP${(d.bp_sys || d.bp_dia) ? `: ${d.bp_sys || ''}/${d.bp_dia || ''}` : ''}`;
+    case 'womens_mood':    return `Women's mood${d.mood ? `: ${d.mood}` : ''}`;
+    case 'fetal_movement': return `Fetal movement${d.kick_count ? ` - ${d.kick_count} kicks` : ''}`;
+    case 'baby_kick':      return `Baby kick${d.kick_count ? ` - ${d.kick_count}` : ''}`;
+    default:               return `Health log: ${tab}`;
+  }
+}
+
+// ── fetch helper with AbortController timeout ────────────────────────────────
+async function fetchWithTimeout_(url, options, timeoutMs) {
+  const fetch = (await import('node-fetch')).default;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ============================================================================
+// GET /api/me/health/profile
+// ============================================================================
+app.get('/api/me/health/profile', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    if (!userEmail) return res.status(400).json({ error: 'NO_USER_EMAIL' });
+    const healthSheetId = await getHealthSheetId_(userEmail);
+    const adminToken    = await getRefreshTokenForEmail(HEALTH_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+    const [baselineRes, goalRes] = await Promise.all([
+      sheets.spreadsheets.values.get({ spreadsheetId: healthSheetId, range: 'Baseline!A:Q' }), // [v4.0] A:P → A:Q (dob)
+      sheets.spreadsheets.values.get({ spreadsheetId: healthSheetId, range: 'Goal!A:N' }),
+    ]);
+    res.set('Cache-Control', 'no-store');
+    res.status(200).json({ baseline: parseHealthBaseline_(baselineRes.data.values || []), goal: parseHealthGoal_(goalRes.data.values || []) });
+  } catch (err) {
+    console.error('Error in /api/me/health/profile:', err);
+    res.status(500).json({ error: 'HEALTH_PROFILE_FAILED', message: err.message });
+  }
+});
+
+// ============================================================================
+// PUT /api/me/health/profile
+// POST /api/me/health/profile  [v4.0] panel-infogoal 호환
+// ============================================================================
+async function handleHealthProfileSave_(req, res) {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { type, data } = req.body || {};
+    if (!type || !data) return res.status(400).json({ error: 'MISSING_TYPE_OR_DATA' });
+    if (!['baseline','goal'].includes(type)) return res.status(400).json({ error: 'INVALID_TYPE' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    const healthSheetId = await getHealthSheetId_(userEmail);
+    const adminToken    = await getRefreshTokenForEmail(HEALTH_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+    const converted = type === 'baseline' ? convertUnits_(data, 'health') : data;
+    if (type === 'baseline' && converted.weight_kg && converted.height_cm && converted.age && converted.sex) {
+      const sex = (converted.sex || '').toLowerCase();
+      const bmr = sex === 'male'
+        ? 10 * converted.weight_kg + 6.25 * converted.height_cm - 5 * converted.age + 5
+        : 10 * converted.weight_kg + 6.25 * converted.height_cm - 5 * converted.age - 161;
+      converted.bmr_kcal  = +bmr.toFixed(0);
+      converted.tdee_kcal = +(bmr * (parseFloat(converted.activity_level) || 1.55)).toFixed(0);
+    }
+    const newRow = buildHealthRow_(type, converted);
+    if (!newRow.length) return res.status(400).json({ error: 'INVALID_DATA' });
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: healthSheetId, range: `${HEALTH_TAB_MAP[type]}!A:A`,
+      valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [newRow] },
+    });
+    console.log(`✅ Health profile (${type}) saved for ${userEmail}`);
+    res.status(200).json({ ok: true, type, data: converted });
+  } catch (err) {
+    console.error('Error in health/profile save:', err);
+    res.status(500).json({ error: 'HEALTH_PROFILE_SAVE_FAILED', message: err.message });
+  }
+}
+
+app.put('/api/me/health/profile',  handleHealthProfileSave_);
+app.post('/api/me/health/profile', handleHealthProfileSave_); // [v4.0] 신규
+
+// ============================================================================
+// GET /api/me/health
+// ============================================================================
+app.get('/api/me/health', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const now        = new Date();
+    const targetDate = req.query.date   || now.toISOString().slice(0, 10);
+    const period     = req.query.period || 'daily';
+    const tabFilter  = req.query.tab    || 'all';
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    if (!userEmail) return res.status(400).json({ error: 'NO_USER_EMAIL' });
+    const healthSheetId = await getHealthSheetId_(userEmail);
+    const adminToken    = await getRefreshTokenForEmail(HEALTH_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+
+    // [v4.0] 기본 탭 + 신규 탭 포함
+    const ALL_TABS = ['food','activity','health','sleep','mood','custom','water','medication','womens','womens_bp','womens_mood','fetal_movement','baby_kick'];
+    // [v4.5] 'all'에 'womens'가 빠져 있던 버그 수정 — 대시보드의 loadHealth()가 tab=all로
+    // 한 번에 받아서 날짜별로 버킷팅하는데, womens가 없어서 Women's 항목이 전혀 안 보였음.
+    const tabsToFetch = tabFilter === 'all'
+      ? ['food','activity','health','sleep','mood','custom','womens','water']  // 기본 조회 세트 [water 추가]
+      : [tabFilter].filter(t => HEALTH_TAB_MAP[t]);
+
+    // [v4.0] 탭별 범위 — 신규 탭은 충분한 범위 설정
+    const TAB_RANGE = {
+      food: 'O', activity: 'P', health: 'AA', sleep: 'I', mood: 'F',
+      custom: 'E', water: 'H', medication: 'I',
+      womens: 'AH', womens_bp: 'G', womens_mood: 'F', // [v4.6] AH=calendar_event_id 추가
+      fetal_movement: 'H', baby_kick: 'H',
+    };
+    const ranges = tabsToFetch.map(t => ({
+      tab: t,
+      range: `${HEALTH_TAB_MAP[t]}!A:${TAB_RANGE[t] || 'Z'}`,
+    }));
+    const results = await Promise.all(
+      ranges.map(({ range }) => sheets.spreadsheets.values.get({ spreadsheetId: healthSheetId, range }))
+    );
+    const parsed = {};
+    ranges.forEach(({ tab }, i) => { parsed[tab] = parseHealthRows_(results[i].data.values || [], tab, targetDate, period); });
+
+    const food     = parsed['food']     || [];
+    const activity = parsed['activity'] || [];
+    const health   = parsed['health']   || [];
+    const sleep    = parsed['sleep']    || [];
+    const mood     = parsed['mood']     || [];
+    const custom   = parsed['custom']   || [];
+
+    // [부수 발견 수정] buildHealthSummary_는 필드명(total_steps, total_calories_burned_kcal 등)이
+    // 마치 "하루치" 값을 뜻하는 것처럼 보이지만, 실제로는 period로 필터링된 배열(food/activity/...)을
+    // 그대로 합산한다. period=monthly로 조회하면 summary가 "그 달 전체 합계"를 반환하면서
+    // 필드 이름은 하루 단위처럼 보이는 오해의 소지가 있었다.
+    // → summary는 항상 targetDate 하루 기준으로 고정해서 계산하고(요청한 period와 무관하게),
+    //   food/activity/health/sleep/mood/custom 등 원본 배열 응답은 기존처럼 요청한 period
+    //   전체를 그대로 반환한다(weekly/monthly 조회 기능 자체는 그대로 유지).
+    const dailyOnly_ = (arr) => arr.filter(r => (r.stamp_date || '').toString().slice(0, 10) === targetDate);
+    const summaryFood     = period === 'daily' ? food     : dailyOnly_(food);
+    const summaryActivity = period === 'daily' ? activity : dailyOnly_(activity);
+    const summaryHealth   = period === 'daily' ? health   : dailyOnly_(health);
+    const summarySleep    = period === 'daily' ? sleep    : dailyOnly_(sleep);
+    const summaryMood     = period === 'daily' ? mood     : dailyOnly_(mood);
+
+    const responseObj = {
+      date: targetDate, period,
+      summary: buildHealthSummary_(summaryFood, summaryActivity, summaryHealth, summarySleep, summaryMood),
+      food, activity, health, sleep, mood, custom,
+    };
+    // [신규] weekly/monthly 조회는 원본 배열(food/activity/...)이 그 기간 전체이므로,
+    // 그걸 그대로 평균 분석해서 별도 필드로 얹어준다 — summary(위)는 항상 하루치라
+    // 기간 분석이 필요한 화면(예: 대시보드 Weekly/Monthly 드롭다운)은 이 필드를 써야 한다.
+    // daily 조회는 하루=기간이라 summary와 중복이라 안 붙임.
+    if (period !== 'daily') {
+      responseObj.period_average = buildHealthPeriodAverage_(food, activity, health, sleep, mood);
+    }
+    // 신규 탭 결과도 포함
+    ['water','medication','womens','womens_bp','womens_mood','fetal_movement','baby_kick'].forEach(t => {
+      if (parsed[t]) responseObj[t] = parsed[t];
+    });
+
+    res.set('Cache-Control', 'no-store');
+    res.status(200).json(responseObj);
+  } catch (err) {
+    console.error('Error in /api/me/health:', err);
+    res.status(500).json({ error: 'HEALTH_FETCH_FAILED', message: err.message });
+  }
+});
+
+// ============================================================================
+// POST /api/me/health/log
+// ============================================================================
+app.post('/api/me/health/log', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { tab, data, unit_pref } = req.body || {};
+    if (!tab)  return res.status(400).json({ error: 'MISSING_TAB' });
+    if (!data) return res.status(400).json({ error: 'MISSING_DATA' });
+    if (!HEALTH_TAB_MAP[tab]) return res.status(400).json({ error: 'INVALID_TAB' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    const healthSheetId = await getHealthSheetId_(userEmail);
+    const adminToken    = await getRefreshTokenForEmail(HEALTH_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+    const stamp = data.stamp_date || new Date().toISOString().slice(0, 19).replace('T', ' ');
+    let converted = convertUnits_({ ...data, stamp_date: stamp, unit_pref: unit_pref || 'metric' }, tab);
+    if (tab === 'activity' && converted.met_value && converted.duration_min && converted.weight_kg) {
+      converted.calories_burned_kcal = calcActivityCalories_(converted.met_value, converted.weight_kg, converted.duration_min);
+    }
+    if (tab === 'sleep' && converted.bedtime && converted.wake_time && !converted.duration_min) {
+      try {
+        const [bH, bM] = converted.bedtime.split(':').map(Number);
+        const [wH, wM] = converted.wake_time.split(':').map(Number);
+        let mins = (wH * 60 + wM) - (bH * 60 + bM);
+        if (mins < 0) mins += 1440;
+        converted.duration_min = mins; converted.duration_hr = +(mins / 60).toFixed(1);
+      } catch (e) {}
+    }
+
+    // [v4.0] medication 케이스B: 복약체크 — taken/taken_at update (기존 행 찾아 update)
+    if (tab === 'medication' && data.med_id) {
+      // med_id로 기존 행 찾아 update (taken='Y', taken_at=stamp)
+      const tabRes = await sheets.spreadsheets.values.get({ spreadsheetId: healthSheetId, range: `${HEALTH_TAB_MAP[tab]}!A:I` });
+      const rows   = tabRes.data.values || [];
+      let targetRow = null;
+      for (let r = 3; r < rows.length; r++) {
+        if (!rows[r] || !rows[r][0]) continue;
+        if ((rows[r][1] || '').toString().trim() === data.med_name) { targetRow = r + 1; break; }
+      }
+      if (targetRow) {
+        await sheets.spreadsheets.values.batchUpdate({
+          spreadsheetId: healthSheetId,
+          requestBody: {
+            valueInputOption: 'USER_ENTERED',
+            data: [
+              { range: `${HEALTH_TAB_MAP[tab]}!G${targetRow}`, values: [[data.taken || 'Y']] },
+              { range: `${HEALTH_TAB_MAP[tab]}!H${targetRow}`, values: [[stamp]] },
+            ],
+          },
+        });
+        console.log(`✅ Medication check updated for ${data.med_name} (row ${targetRow})`);
+        return res.status(200).json({ ok: true, tab, updated_row: targetRow, data: converted });
+      }
+      // 행을 못 찾으면 새로 추가
+    }
+
+    const appendRes = await sheets.spreadsheets.values.append({
+      spreadsheetId: healthSheetId, range: `${HEALTH_TAB_MAP[tab]}!A:A`,
+      valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [buildHealthRow_(tab, converted)] },
+    });
+    const rowNum = ((appendRes.data.updates || {}).updatedRange || '').match(/(\d+)$/);
+    console.log(`✅ Health log (${tab}) saved for ${userEmail}`);
+
+    // [되살림] Finance의 createCalendarEvent와 동일한 패턴 — add_to_calendar='Y'/true면
+    // 실제 Google Calendar 이벤트 생성. 이벤트 ID는 시트에 저장하지 않음(일회성, 수정/삭제 추적 불필요 — 확인됨).
+    let calendarEvent = null;
+    let calendarReauthRequired = false;
+    const wantsCalendar = converted.add_to_calendar === true ||
+      ['y', 'yes', 'true', '1'].includes(String(converted.add_to_calendar || '').trim().toLowerCase());
+    if (wantsCalendar) {
+      try {
+        const userClient = createOAuth2Client(req);
+        const calendar   = google.calendar({ version: 'v3', auth: userClient });
+        const eventDate  = (converted.stamp_date || stamp || '').toString().slice(0, 10) || new Date().toISOString().slice(0, 10);
+        const eventTitle = buildHealthEventTitle_(tab, converted);
+        const eventBody  = {
+          summary: eventTitle, description: converted.notes || '',
+          start: { date: eventDate }, end: { date: eventDate }, visibility: 'private',
+        };
+        const calRes = await calendar.events.insert({ calendarId: 'primary', requestBody: eventBody });
+        calendarEvent = { id: calRes.data.id, htmlLink: calRes.data.htmlLink };
+      } catch (calErr) {
+        console.error('Health calendar event creation failed:', calErr.message);
+        // [REAUTH_REQUIRED 신호] health 로그 자체(위 appendRes)는 이미 저장 성공했으므로
+        // 전체 요청을 실패 처리하지 않고, 캘린더 파트만 실패했다는 신호를 응답에 실어 보낸다.
+        // 프론트는 이 플래그를 보고 재연결 배너를 띄우면 된다 (health 데이터는 이미 저장됐음을 알림).
+        if (isReauthRequiredError_(calErr)) calendarReauthRequired = true;
+      }
+    }
+
+    res.status(200).json({
+      ok: true, tab, row: rowNum ? parseInt(rowNum[1]) : null, data: converted,
+      calendar_event: calendarEvent, calendar_reauth_required: calendarReauthRequired,
+    });
+  } catch (err) {
+    console.error('Error in /api/me/health/log:', err);
+    res.status(500).json({ error: 'HEALTH_LOG_FAILED', message: err.message });
+  }
+});
+
+// ============================================================================
+// POST /api/me/health/log/edit
+// ============================================================================
+app.post('/api/me/health/log/edit', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { tab, row_idx, sheet_row, data } = req.body || {};
+    if (!tab || !data || !HEALTH_TAB_MAP[tab] || (row_idx === undefined && sheet_row === undefined)) {
+      return res.status(400).json({ error: 'MISSING_OR_INVALID_PARAMS' });
+    }
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    const healthSheetId = await getHealthSheetId_(userEmail);
+    const adminToken    = await getRefreshTokenForEmail(HEALTH_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets   = google.sheets({ version: 'v4', auth: adminClient });
+    const sheetTab = HEALTH_TAB_MAP[tab];
+
+    // [v4.4] sheet_row(실제 시트 행 번호, GET 응답의 _sheet_row 그대로)가 오면 이걸 그대로 씀 —
+    // row_idx(탭 전체에서 몇 번째 비어있지 않은 행인지 다시 세는 방식)는 날짜 필터링 없이 세다 보니
+    // 포맷 안내용 행(예: Women 탭 4행 "YYYY-MM-DD")까지 세어져 어긋날 수 있는 알려진 취약점이라,
+    // 새 호출부는 전부 sheet_row를 쓰도록 전환. row_idx는 옛 호출부 호환을 위해 그대로 남겨둠.
+    let sheetRowNumber = null;
+    if (sheet_row !== undefined) {
+      sheetRowNumber = parseInt(sheet_row);
+      if (!sheetRowNumber || sheetRowNumber < 4) return res.status(400).json({ error: 'INVALID_SHEET_ROW' });
+    } else {
+      const tabRes = await sheets.spreadsheets.values.get({ spreadsheetId: healthSheetId, range: `${sheetTab}!A:A` });
+      const rows   = tabRes.data.values || [];
+      let matchCount = 0;
+      for (let r = 3; r < rows.length; r++) {
+        if (!rows[r] || !rows[r][0]) continue;
+        if (matchCount === parseInt(row_idx)) { sheetRowNumber = r + 1; break; }
+        matchCount++;
+      }
+    }
+    if (!sheetRowNumber) return res.status(404).json({ error: 'ROW_NOT_FOUND' });
+    const converted = convertUnits_({ ...data }, tab);
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: healthSheetId, range: `${sheetTab}!A${sheetRowNumber}`,
+      valueInputOption: 'USER_ENTERED', requestBody: { values: [buildHealthRow_(tab, converted)] },
+    });
+    res.status(200).json({ ok: true, tab, sheet_row: sheetRowNumber, data: converted });
+  } catch (err) {
+    console.error('Error in /api/me/health/log/edit:', err);
+    res.status(500).json({ error: 'HEALTH_EDIT_FAILED', message: err.message });
+  }
+});
+
+// ============================================================================
+// POST /api/me/health/log/delete
+// ============================================================================
+app.post('/api/me/health/log/delete', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { tab, row_idx, sheet_row } = req.body || {};
+    if (!tab || !HEALTH_TAB_MAP[tab] || (row_idx === undefined && sheet_row === undefined)) {
+      return res.status(400).json({ error: 'MISSING_OR_INVALID_PARAMS' });
+    }
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    const healthSheetId = await getHealthSheetId_(userEmail);
+    const adminToken    = await getRefreshTokenForEmail(HEALTH_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets   = google.sheets({ version: 'v4', auth: adminClient });
+    const sheetTab = HEALTH_TAB_MAP[tab];
+
+    // [v4.4] sheet_row 우선 사용 — /edit과 동일한 이유(row_idx의 알려진 취약점 회피).
+    let sheetRowNumber = null;
+    if (sheet_row !== undefined) {
+      sheetRowNumber = parseInt(sheet_row);
+      if (!sheetRowNumber || sheetRowNumber < 4) return res.status(400).json({ error: 'INVALID_SHEET_ROW' });
+    } else {
+      const tabRes = await sheets.spreadsheets.values.get({ spreadsheetId: healthSheetId, range: `${sheetTab}!A:A` });
+      const rows   = tabRes.data.values || [];
+      let matchCount = 0;
+      for (let r = 3; r < rows.length; r++) {
+        if (!rows[r] || !rows[r][0]) continue;
+        if (matchCount === parseInt(row_idx)) { sheetRowNumber = r + 1; break; }
+        matchCount++;
+      }
+    }
+    if (!sheetRowNumber) return res.status(404).json({ error: 'ROW_NOT_FOUND' });
+    const meta      = await sheets.spreadsheets.get({ spreadsheetId: healthSheetId });
+    const sheetMeta = (meta.data.sheets || []).find(s => s.properties.title === sheetTab);
+    const sheetId   = sheetMeta ? sheetMeta.properties.sheetId : null;
+    if (sheetId !== null) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: healthSheetId,
+        requestBody: { requests: [{ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex: sheetRowNumber - 1, endIndex: sheetRowNumber } } }] },
+      });
+    } else {
+      await sheets.spreadsheets.values.clear({ spreadsheetId: healthSheetId, range: `${sheetTab}!A${sheetRowNumber}:AM${sheetRowNumber}` });
+    }
+    console.log(`✅ Health log (${tab}) deleted row ${sheetRowNumber} for ${userEmail}`);
+    res.status(200).json({ ok: true, tab, sheet_row: sheetRowNumber });
+  } catch (err) {
+    console.error('Error in /api/me/health/log/delete:', err);
+    res.status(500).json({ error: 'HEALTH_DELETE_FAILED', message: err.message });
+  }
+});
+
+// ============================================================================
+// RECORDS CRUD  [v4.0 신규]
+// Records 시트: record_id | record_type | data_json | created_at | updated_at
+// ============================================================================
+
+// GET /api/me/health/records?type=X
+app.get('/api/me/health/records', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    if (!userEmail) return res.status(400).json({ error: 'NO_USER_EMAIL' });
+    const typeFilter = (req.query.type || '').toLowerCase();
+    const healthSheetId = await getHealthSheetId_(userEmail);
+    const adminToken    = await getRefreshTokenForEmail(HEALTH_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+    const tabRes = await sheets.spreadsheets.values.get({ spreadsheetId: healthSheetId, range: 'Records!A:E' });
+    const rows   = tabRes.data.values || [];
+    const records = [];
+    for (let r = 1; r < rows.length; r++) {
+      const row = rows[r];
+      if (!row || !row[0]) continue;
+      const record_type = (row[1] || '').toString().trim();
+      if (typeFilter && record_type !== typeFilter) continue;
+      let data_parsed = {};
+      try { data_parsed = JSON.parse(row[2] || '{}'); } catch (e) {}
+      records.push({
+        record_id:   (row[0] || '').toString().trim(),
+        record_type,
+        data:        data_parsed,
+        created_at:  (row[3] || '').toString().trim(),
+        updated_at:  (row[4] || '').toString().trim(),
+        _sheet_row:  r + 1,
+      });
+    }
+    res.set('Cache-Control', 'no-store');
+    res.status(200).json({ records, count: records.length, type: typeFilter || 'all' });
+  } catch (err) {
+    console.error('Error in GET /api/me/health/records:', err);
+    res.status(500).json({ error: 'RECORDS_FETCH_FAILED', message: err.message });
+  }
+});
+
+// POST /api/me/health/records
+app.post('/api/me/health/records', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { record_type, data } = req.body || {};
+    if (!record_type) return res.status(400).json({ error: 'MISSING_RECORD_TYPE' });
+    if (!data)        return res.status(400).json({ error: 'MISSING_DATA' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    const healthSheetId = await getHealthSheetId_(userEmail);
+    const adminToken    = await getRefreshTokenForEmail(HEALTH_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets    = google.sheets({ version: 'v4', auth: adminClient });
+    const record_id = `rec_${Date.now()}`;
+    const now_iso   = new Date().toISOString();
+    const newRow    = [ record_id, record_type, JSON.stringify(data), now_iso, now_iso ];
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: healthSheetId, range: 'Records!A:E',
+      valueInputOption: 'USER_ENTERED', insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [newRow] },
+    });
+    console.log(`✅ Record created: ${record_id} (${record_type}) for ${userEmail}`);
+    res.status(200).json({ ok: true, record_id, record_type, data, created_at: now_iso });
+  } catch (err) {
+    console.error('Error in POST /api/me/health/records:', err);
+    res.status(500).json({ error: 'RECORD_CREATE_FAILED', message: err.message });
+  }
+});
+
+// PUT /api/me/health/records/:id
+app.put('/api/me/health/records/:id', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { id } = req.params;
+    const { data } = req.body || {};
+    if (!id)   return res.status(400).json({ error: 'MISSING_RECORD_ID' });
+    if (!data) return res.status(400).json({ error: 'MISSING_DATA' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    const healthSheetId = await getHealthSheetId_(userEmail);
+    const adminToken    = await getRefreshTokenForEmail(HEALTH_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+    const tabRes = await sheets.spreadsheets.values.get({ spreadsheetId: healthSheetId, range: 'Records!A:A' });
+    const rows   = tabRes.data.values || [];
+    let sheetRow = null;
+    for (let r = 1; r < rows.length; r++) {
+      if ((rows[r] && rows[r][0] || '').toString().trim() === id) { sheetRow = r + 1; break; }
+    }
+    if (!sheetRow) return res.status(404).json({ error: 'RECORD_NOT_FOUND' });
+    const now_iso = new Date().toISOString();
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: healthSheetId,
+      requestBody: {
+        valueInputOption: 'USER_ENTERED',
+        data: [
+          { range: `Records!C${sheetRow}`, values: [[JSON.stringify(data)]] },
+          { range: `Records!E${sheetRow}`, values: [[now_iso]] },
+        ],
+      },
+    });
+    console.log(`✅ Record updated: ${id} for ${userEmail}`);
+    res.status(200).json({ ok: true, record_id: id, data, updated_at: now_iso });
+  } catch (err) {
+    console.error('Error in PUT /api/me/health/records/:id:', err);
+    res.status(500).json({ error: 'RECORD_UPDATE_FAILED', message: err.message });
+  }
+});
+
+// DELETE /api/me/health/records/:id
+app.delete('/api/me/health/records/:id', async (req, res) => {
+  try {
+    if (!req.session || !req.session.tokens) return res.status(401).json({ error: 'NOT_CONNECTED' });
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ error: 'MISSING_RECORD_ID' });
+    const userInfo  = req.session.user || {};
+    const userEmail = (userInfo.email || userInfo.primaryEmail || '').toLowerCase();
+    const healthSheetId = await getHealthSheetId_(userEmail);
+    const adminToken    = await getRefreshTokenForEmail(HEALTH_ADMIN);
+    if (!adminToken) return res.status(500).json({ error: 'NO_ADMIN_TOKEN' });
+    const adminClient = createOAuth2Client(null);
+    adminClient.setCredentials({ refresh_token: adminToken });
+    const sheets = google.sheets({ version: 'v4', auth: adminClient });
+    const tabRes = await sheets.spreadsheets.values.get({ spreadsheetId: healthSheetId, range: 'Records!A:A' });
+    const rows   = tabRes.data.values || [];
+    let sheetRow = null;
+    for (let r = 1; r < rows.length; r++) {
+      if ((rows[r] && rows[r][0] || '').toString().trim() === id) { sheetRow = r + 1; break; }
+    }
+    if (!sheetRow) return res.status(404).json({ error: 'RECORD_NOT_FOUND' });
+    const meta      = await sheets.spreadsheets.get({ spreadsheetId: healthSheetId });
+    const sheetMeta = (meta.data.sheets || []).find(s => s.properties.title === 'Records');
+    const sheetId   = sheetMeta ? sheetMeta.properties.sheetId : null;
+    if (sheetId !== null) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: healthSheetId,
+        requestBody: { requests: [{ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex: sheetRow - 1, endIndex: sheetRow } } }] },
+      });
+    } else {
+      await sheets.spreadsheets.values.clear({ spreadsheetId: healthSheetId, range: `Records!A${sheetRow}:E${sheetRow}` });
+    }
+    console.log(`✅ Record deleted: ${id} (row ${sheetRow}) for ${userEmail}`);
+    res.status(200).json({ ok: true, record_id: id, sheet_row: sheetRow });
+  } catch (err) {
+    console.error('Error in DELETE /api/me/health/records/:id:', err);
+    res.status(500).json({ error: 'RECORD_DELETE_FAILED', message: err.message });
+  }
+});
+
+// ============================================================================
+// POST /api/health/food/search
+// USDA FoodData Central (1순위) + Open Food Facts (barcode / fallback)
+// ============================================================================
+app.post('/api/health/food/search', async (req, res) => {
+  try {
+    const query   = (req.body && req.body.query)   ? String(req.body.query).trim()   : '';
+    const barcode = (req.body && req.body.barcode) ? String(req.body.barcode).trim() : '';
+    if (!query && !barcode) return res.status(400).json({ error: 'MISSING_QUERY_OR_BARCODE' });
+
+    const USDA_API_KEY = process.env.USDA_FOOD_API_KEY || 'DEMO_KEY';
+
+    function extractUsdaNutrients_(foodNutrients) {
+      const map = {};
+      for (const n of (foodNutrients || [])) {
+        if (n.nutrientId) map[n.nutrientId] = n.value || 0;
+      }
+      return map;
+    }
+
+    const USDA_PRIORITY = { 'Foundation': 0, 'SR Legacy': 1, 'Survey (FNDDS)': 2, 'Branded': 3 };
+
+    // 1. 바코드 → Open Food Facts
+    if (barcode) {
+      try {
+        const r = await fetchWithTimeout_(
+          `https://world.openfoodfacts.org/api/v2/product/${barcode}.json`,
+          { headers: { 'User-Agent': 'MIE-Health/1.0 (kairoks.com)' } },
+          8000
+        );
+        if (r.ok) {
+          const d = await r.json();
+          if (d.status === 1 && d.product) {
+            const p = d.product, n = p.nutriments || {};
+            console.log(`✅ Food search (barcode ${barcode}) → Open Food Facts`);
+            return res.status(200).json({
+              foods: [{
+                food_name:            p.product_name_en || p.product_name || '',
+                brand_name:           p.brands || '',
+                calories_kcal:        +(n['energy-kcal_serving'] || n['energy-kcal_100g'] || 0),
+                protein_g:            +(n['proteins_serving']    || n['proteins_100g']    || 0),
+                carbs_g:              +(n['carbohydrates_serving']|| n['carbohydrates_100g']|| 0),
+                fat_g:                +(n['fat_serving']         || n['fat_100g']         || 0),
+                fiber_g:              +(n['fiber_serving']       || n['fiber_100g']       || 0),
+                serving_qty:          1,
+                serving_unit:         p.serving_size || '1 serving',
+                serving_weight_grams: parseFloat(p.serving_quantity) || null,
+                barcode,
+                source: 'Open Food Facts',
+              }],
+              query: barcode, source: 'Open Food Facts',
+            });
+          }
+        }
+      } catch (e) { console.warn('Barcode lookup failed:', e.message); }
+      return res.status(200).json({ foods: [], query: barcode, source: null, message: 'Barcode not found.' });
+    }
+
+    // 2. 키워드 → USDA FoodData Central
+    try {
+      const usdaUrl =
+        `https://api.nal.usda.gov/fdc/v1/foods/search` +
+        `?api_key=${USDA_API_KEY}` +
+        `&query=${encodeURIComponent(query)}` +
+        `&pageSize=20` +
+        `&dataType=Foundation,SR%20Legacy,Survey%20(FNDDS),Branded`;
+
+      const r = await fetchWithTimeout_(usdaUrl, {}, 10000);
+      if (r.ok) {
+        const data  = await r.json();
+        const foods = (data.foods || [])
+          .map(food => {
+            const nutrients    = extractUsdaNutrients_(food.foodNutrients);
+            const servingSize  = food.servingSize || 100;
+            const servingUnit  = food.servingSizeUnit || 'g';
+            const scale        = servingSize / 100;
+            const protein_g    = +((nutrients[1003] || 0) * scale).toFixed(1);
+            const carbs_g      = +((nutrients[1005] || 0) * scale).toFixed(1);
+            const fat_g        = +((nutrients[1004] || 0) * scale).toFixed(1);
+            const fiber_g      = +((nutrients[1079] || 0) * scale).toFixed(1);
+            const usdaCal      = +((nutrients[1008] || 0) * scale).toFixed(1);
+            const calories_kcal = usdaCal > 0
+              ? usdaCal
+              : +(protein_g * 4 + carbs_g * 4 + fat_g * 9).toFixed(1);
+            return {
+              food_name:            food.description || '',
+              brand_name:           food.brandOwner || food.brandName || '',
+              calories_kcal, protein_g, carbs_g, fat_g, fiber_g,
+              serving_qty:          1,
+              serving_unit:         `${servingSize}${servingUnit}`,
+              serving_weight_grams: servingUnit === 'g' ? servingSize : null,
+              fdc_id:               food.fdcId || null,
+              data_type:            food.dataType || '',
+              source:               'USDA FoodData Central',
+            };
+          })
+          .filter(f => f.food_name && (f.calories_kcal > 0 || f.protein_g > 0))
+          .sort((a, b) => (USDA_PRIORITY[a.data_type] ?? 9) - (USDA_PRIORITY[b.data_type] ?? 9))
+          .slice(0, 8);
+
+        if (foods.length > 0) {
+          console.log(`✅ Food search "${query}" → USDA (${foods.length} results, top: ${foods[0].data_type})`);
+          return res.status(200).json({ foods, query, source: 'USDA FoodData Central' });
+        }
+        console.warn(`⚠️ USDA returned 0 usable results for "${query}" — falling back to Open Food Facts`);
+      } else {
+        console.warn(`⚠️ USDA non-OK status ${r.status} for "${query}" — falling back`);
+      }
+    } catch (e) { console.warn('USDA search failed:', e.message); }
+
+    // 3. Fallback → Open Food Facts 키워드 검색
+    const buildOffUrl = (page) =>
+      `https://world.openfoodfacts.org/cgi/search.pl` +
+      `?search_terms=${encodeURIComponent(query)}` +
+      `&search_simple=1&action=process&json=1` +
+      `&page_size=20&page=${page}&lc=en&cc=us`;
+
+    function isEnglishName_(name) {
+      if (!name) return false;
+      const ascii = name.split('').filter(c => c.charCodeAt(0) < 128).length;
+      return ascii / name.length >= 0.7;
+    }
+
+    try {
+      const [r1, r2] = await Promise.all([
+        fetchWithTimeout_(buildOffUrl(1), { headers: { 'User-Agent': 'MIE-Health/1.0 (kairoks.com)' } }, 8000),
+        fetchWithTimeout_(buildOffUrl(2), { headers: { 'User-Agent': 'MIE-Health/1.0 (kairoks.com)' } }, 8000),
+      ]);
+      const products = [];
+      for (const r of [r1, r2]) {
+        if (r.ok) { const d = await r.json(); products.push(...(d.products || [])); }
+      }
+      const mapProduct = (p) => {
+        const n = p.nutriments || {};
+        return {
+          food_name:            p.product_name_en || p.product_name || '',
+          brand_name:           p.brands || '',
+          calories_kcal:        +(n['energy-kcal_serving'] || n['energy-kcal_100g'] || 0),
+          protein_g:            +(n['proteins_serving']    || n['proteins_100g']    || 0),
+          carbs_g:              +(n['carbohydrates_serving']|| n['carbohydrates_100g']|| 0),
+          fat_g:                +(n['fat_serving']         || n['fat_100g']         || 0),
+          fiber_g:              +(n['fiber_serving']       || n['fiber_100g']       || 0),
+          serving_qty:          1,
+          serving_unit:         p.serving_size || '100g',
+          serving_weight_grams: parseFloat(p.serving_quantity) || null,
+          source:               'Open Food Facts',
+        };
+      };
+      let foods = products.map(mapProduct).filter(f => f.food_name && f.calories_kcal > 0 && isEnglishName_(f.food_name));
+      if (foods.length < 3) foods = products.map(mapProduct).filter(f => f.food_name && f.calories_kcal > 0);
+      const seen = new Set();
+      foods = foods.filter(f => { if (seen.has(f.food_name)) return false; seen.add(f.food_name); return true; }).slice(0, 8);
+      if (foods.length > 0) {
+        console.log(`✅ Food search "${query}" → Open Food Facts fallback (${foods.length} results)`);
+        return res.status(200).json({ foods, query, source: 'Open Food Facts' });
+      }
+    } catch (e) { console.warn('Open Food Facts fallback failed:', e.message); }
+
+    console.warn(`⚠️ Food search "${query}" → no results from any source`);
+    res.status(200).json({ foods: [], query, source: null, message: 'No results found. Try a different search term.' });
+
+  } catch (err) {
+    console.error('Error in /api/health/food/search:', err);
+    res.status(500).json({ error: 'FOOD_SEARCH_FAILED', message: err.message });
+  }
+});
+
+// ================== START SERVER ==================
+
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`\n🚀 Mie Backend v4.0 listening on port ${PORT}`);
+  console.log('='.repeat(60));
+  console.log(`KMS encryption:      ${KMS_KEY_NAME ? '✓ ENABLED' : '✗ DISABLED'}`);
+  console.log(`Gmail AS webhook:    ${SCRIPT_WEBHOOK ? '✓ SET' : '✗ NOT SET'}`);
+  console.log(`Calendar AS webhook: ${CALENDAR_SCRIPT_WEBHOOK ? '✓ SET' : '✗ NOT SET'}`);
+  console.log(`Pub/Sub topic:       ${PUBSUB_TOPIC_NAME}`);
+  console.log(`USDA Food API key:   ${process.env.USDA_FOOD_API_KEY ? '✓ SET' : '✗ DEMO_KEY (30 req/hr limit)'}`);
+  console.log('\n📋 v4.0 전체 라우트:');
+  console.log('  Auth:     GET /auth/google  GET /auth/google/callback  POST /auth/logout');
+  console.log('  Status:   GET /api/me/status');
+  console.log('  Calendar: GET /api/me/calendars  GET /api/me/events');
+  console.log('            POST events/create  POST events/update  POST events/delete');
+  console.log('  Tasks:    GET /api/me/tasks  POST tasks/create  POST tasks/update  POST tasks/lists/create');
+  console.log('  Misc:     POST /api/me/message  POST /api/me/access-token');
+  console.log('  PubSub:   POST /api/pubsub/gmail-push  POST /api/pubsub/calendar-push');
+  console.log('  Watch:    GET /api/calendar/watch  /status  /renew-all');
+  console.log('            GET /api/gmail/watch  /status');
+  console.log('  Finance:  GET /api/me/finance  PUT baseline  PUT baseline/bulk');
+  console.log('            POST transaction  POST transaction/edit  POST transaction/delete');
+  console.log('  Health:   GET  /api/me/health/profile');
+  console.log('            PUT  /api/me/health/profile  POST /api/me/health/profile');
+  console.log('            GET  /api/me/health  POST /api/me/health/log');
+  console.log('            POST /api/me/health/log/edit  POST /api/me/health/log/delete');
+  console.log('  Records:  GET /api/me/health/records  POST /api/me/health/records');
+  console.log('            PUT /api/me/health/records/:id  DELETE /api/me/health/records/:id');
+  console.log('  Food:     POST /api/health/food/search  ← USDA (1순위) + OFF barcode/fallback');
+  console.log('='.repeat(60) + '\n');
+  scheduleWatchRenewal();
+});
