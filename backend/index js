@@ -174,7 +174,7 @@ try {
   process.exit(1);
 }
 
-const SAVE_TO        = SAVE_TO_EMAIL || 'save@savment.com';
+const SAVE_TO        = SAVE_TO_EMAIL || 'save@kairoks.com';
 const SCRIPT_WEBHOOK = APPS_SCRIPT_WEBHOOK_URL ||
   'https://script.google.com/macros/s/AKfycby_EhIzp7HV7C3ZxxgFRS5VDWn8GGLvfWVUvc7A_sMjZP_NNpTmnLtYDR-xjXIT8zsQ/exec';
 const PUBSUB_TOPIC_NAME = PUBSUB_TOPIC ||
