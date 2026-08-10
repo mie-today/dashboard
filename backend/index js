@@ -176,20 +176,20 @@ try {
 
 const SAVE_TO        = SAVE_TO_EMAIL || 'save@kairoks.com';
 const SCRIPT_WEBHOOK = APPS_SCRIPT_WEBHOOK_URL ||
-  'https://script.google.com/macros/s/AKfycby_EhIzp7HV7C3ZxxgFRS5VDWn8GGLvfWVUvc7A_sMjZP_NNpTmnLtYDR-xjXIT8zsQ/exec';
+  'https://script.google.com/macros/s/AKfycbyOssrf85AoIpyJxyEq80t1_wDYzaYX2gSOgb-J10Nczd1tS5Yj70mdC2qwh7TqUu0s/exec';
 const PUBSUB_TOPIC_NAME = PUBSUB_TOPIC ||
   'projects/ringed-cell-472506-j1/topics/gmail-push-notifications';
 
 const CALENDAR_SCRIPT_WEBHOOK =
   process.env.CALENDAR_SCRIPT_WEBHOOK_URL ||
-  'https://script.google.com/macros/s/AKfycbwLGOmFoDRuMiyirluySMb7NAPJebQJk4A7tnUk40ExTKr-14_XllSuv5lypj8ZJGGw/exec';
+  'https://script.google.com/macros/s/AKfycbxwwiNc9LVcFQ_dgAR5Yi2k7FyGBTB-S0PQfbdCyoY-cJB9HA-LAC06EqNkb4lpmEg/exec';
 
 // [Calendar2Health] Calendar2Finance와 별개의 Apps Script 웹훅 — Health(Body 탭) 자동 기록용.
 // 환경변수 HEALTH_SCRIPT_WEBHOOK_URL을 Cloud Run에 등록하면 그 값이 우선 사용되고,
 // 없으면 아래 하드코딩된 fallback 배포 URL을 그대로 사용한다.
 const HEALTH_SCRIPT_WEBHOOK =
   process.env.HEALTH_SCRIPT_WEBHOOK_URL ||
-  'https://script.google.com/macros/s/AKfycbwXOFw6q24zFpfMw4cdLt5wHj2dHX11ijsitkCzzIemuAxlQbOpjqwkpkieBQtq4HsY/exec';
+  'https://script.google.com/macros/s/AKfycbyKOEmFj4Ob1Hfb9zNogn2pds5Uw_GopcFxqPsx6F6CADWcUJJqpSPKU-iN6Va_YIA_/exec';
 
 const eventColorCache = new Map();
 async function getEventColorById(calendar, colorId) {
