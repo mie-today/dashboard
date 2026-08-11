@@ -304,9 +304,9 @@ html,body{height:100%;overflow:hidden;font-family:'Inter',sans-serif;background:
 <!-- TOPBAR -->
 <div class="topbar">
   <div class="tb-left">
-    <span class="logo">MIARVO</span>
+    <span class="logo">kairoks</span>
     <div class="tb-div"></div>
-    <div class="tb-userline" id="tb-userline">Welcome, Mie <span id="tb-email-span">(mie@gmail.com)</span></div>
+    <div class="tb-userline" id="tb-userline">Welcome, Kairoks <span id="tb-email-span">(k@gmail.com)</span></div>
   </div>
   <div class="tb-right">
     <div class="tb-meta">
@@ -405,7 +405,7 @@ html,body{height:100%;overflow:hidden;font-family:'Inter',sans-serif;background:
   <div class="mb" style="max-width:340px;text-align:center;">
     <div style="font-size:15px;font-weight:600;margin-bottom:6px;">Reconnect your Google account</div>
     <div style="font-size:12px;color:var(--txt2);line-height:1.6;margin-bottom:16px;">We need you to reconnect to keep<br/>showing your calendar, events, and tasks</div>
-    <a href="https://api.mie.today/auth/google" class="bs" id="reauth-full-btn" style="display:block;width:100%;background:var(--teal);text-decoration:none;text-align:center;box-sizing:border-box;">Reconnect</a>
+    <a href="https://api.kairoks.com/auth/google" class="bs" id="reauth-full-btn" style="display:block;width:100%;background:var(--teal);text-decoration:none;text-align:center;box-sizing:border-box;">Reconnect</a>
   </div>
 </div>
 
@@ -414,14 +414,14 @@ html,body{height:100%;overflow:hidden;font-family:'Inter',sans-serif;background:
     <button class="mx" id="reauth-partial-close" style="position:absolute;top:8px;right:12px;">×</button>
     <div style="font-size:15px;font-weight:600;margin-bottom:6px;">Saved, but not added to your calendar</div>
     <div style="font-size:12px;color:var(--txt2);line-height:1.6;margin-bottom:16px;">Your entry was saved. Reconnect Google<br/>to also sync it to your calendar</div>
-    <a href="https://api.mie.today/auth/google" class="bs" id="reauth-partial-btn" style="display:block;width:100%;background:var(--teal);text-decoration:none;text-align:center;box-sizing:border-box;">Reconnect</a>
+    <a href="https://api.kairoks.com/auth/google" class="bs" id="reauth-partial-btn" style="display:block;width:100%;background:var(--teal);text-decoration:none;text-align:center;box-sizing:border-box;">Reconnect</a>
   </div>
 </div>
 
 <script src="/women-sync.js"></script>
 <script>
 'use strict';
-var BACKEND='https://api.mie.today';
+var BACKEND='https://api.kairoks.com';
 
 /* ── Reauth (Google 재연결) 감지 ── */
 var reauthModalShown=false;
@@ -445,7 +445,7 @@ document.getElementById('reauth-full-btn').addEventListener('click',function(){l
 document.getElementById('reauth-partial-btn').addEventListener('click',function(){location.href=BACKEND+'/auth/google';});
 document.getElementById('reauth-partial-close').addEventListener('click',function(){document.getElementById('reauth-modal-partial').classList.add('h');reauthModalShown=false;});
 
-var DRAFT_KEY='mie_drafts_klaive';
+var DRAFT_KEY='kairoks_drafts_kairoks';
 var calendarMeta=[], allEvents=[], eventsByDate={}, allTasks=[], taskLists=[];
 var _finDateSet={}; // Finance 거래가 있는 날짜 집합 {YYYY-MM-DD: true}
 var _finByDate={};  // 날짜별 Finance 거래 목록 {YYYY-MM-DD: [{type,category,amount,notes}]}
@@ -860,7 +860,7 @@ function isoD(y,m,d){return y+'-'+String(m+1).padStart(2,'0')+'-'+String(d).padS
 
 // PRIMARY 달력 식별 키워드 (summary 기반)
 var PRIMARY_CAL_KEYWORDS=['Default','Private','KLAIVE','Women\'s Health'];
-// 색상 매핑 — mieCalendarColor 또는 summary 기반
+// 색상 매핑 — kairoksCalendarColor 또는 summary 기반
 var PRIMARY_CAL_COLORS={
   'Default':'#378ADD',
   'Private':'#534AB7',
@@ -1048,10 +1048,10 @@ function buildCalGridFromEvents(){
 }
 
 // 이벤트 색상 결정 로직
-// Private: ev.visibility === "private" 로 구분 (mieCalendarColor와 무관)
+// Private: ev.visibility === "private" 로 구분 (kairoksCalendarColor와 무관)
 function resolveEventColor(ev, primaryId, defaultEntry, privateEntry, klaiveCal, womensCal){
   var calId=ev.calId;
-  var cc=ev.calColor; // mieCalendarColor
+  var cc=ev.calColor; // kairoksCalendarColor
 
   // Other 달력 이벤트
   var otherC=otherCals.find(function(c){return c.id===calId&&!c.isPrimary;});
@@ -1816,7 +1816,7 @@ function navClick(btn){
 function loadUserInfo(){
   fetch(BACKEND+'/api/me/status',{credentials:'include'})
     .then(function(r){return r.ok?r.json():null;})
-    .then(function(d){if(!d||!d.connected)return;var u=d.user||{};var name=u.given_name||u.givenName||(u.name?u.name.split(' ')[0]:'')||'Mie';var email=u.email||'';var ul=document.getElementById('tb-userline');if(ul){ul.innerHTML='Welcome, '+name+(email?' <span>('+email+')</span>':'');}var av=document.getElementById('tb-av');if(av)av.textContent=name.charAt(0).toUpperCase();})
+    .then(function(d){if(!d||!d.connected)return;var u=d.user||{};var name=u.given_name||u.givenName||(u.name?u.name.split(' ')[0]:'')||'kairoks';var email=u.email||'';var ul=document.getElementById('tb-userline');if(ul){ul.innerHTML='Welcome, '+name+(email?' <span>('+email+')</span>':'');}var av=document.getElementById('tb-av');if(av)av.textContent=name.charAt(0).toUpperCase();})
     .catch(function(){});
 }
 function loadCalendarList(){
@@ -1867,7 +1867,7 @@ function loadEvents(){
           start:(e.start&&(e.start.dateTime||e.start.date))||null,
           end:(e.end&&(e.end.dateTime||e.end.date))||null,
           allDay:!!(e.start&&e.start.date&&!e.start.dateTime),
-          calColor:e.mieCalendarColor||null,
+          calColor:e.kairoksCalendarColor||null,
           loc:e.location||'',
           desc:e.description||'',
           calId:e.calendarId||'primary',
