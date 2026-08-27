@@ -9,6 +9,8 @@
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Inter','Helvetica Neue',Arial,sans-serif;background:var(--bg);color:var(--text2);line-height:1.75;font-size:15px;-webkit-font-smoothing:antialiased}
 .wrap{max-width:720px;margin:0 auto;padding:80px 32px}
+.back{display:inline-block;font-size:13px;color:var(--muted);text-decoration:none;margin-bottom:28px}
+.back:hover{color:var(--text);text-decoration:underline;text-underline-offset:2px}
 h1{font-size:34px;font-weight:300;letter-spacing:-0.5px;color:var(--text);margin-bottom:8px}
 .meta{font-size:12px;color:var(--muted);letter-spacing:0.5px;margin-bottom:32px}
 .lede{color:var(--text);margin-bottom:32px}
@@ -37,8 +39,9 @@ details a:hover{text-decoration:underline}
 </head>
 <body>
 <div class="wrap">
+<a href="/" class="back" id="backlink">&larr; Back to previous page</a>
 <h1>Privacy Policy</h1>
-<div class="meta">Kairoks · Effective date: August 26, 2026 · Last updated: August 26, 2026</div>
+<div class="meta">Kairoks · Effective date: August 26, 2026 · Last updated: August 27, 2026</div>
 
 <p class="lede"><strong>In short:</strong> Kairoks does not sell your personal information, does not share it for advertising or targeted marketing, and shows no ads. We do disclose information to the service providers that run the Service on our behalf, and to authorities where the law requires it. Those cases are described below.</p>
 
@@ -71,6 +74,7 @@ details a:hover{text-decoration:underline}
 <p>Your privacy is important to us at Kairoks. We respect your privacy regarding any information we may collect from you across our Service.</p>
 <p>Kairoks ("Kairoks," "we," "us," or "our") operates the Kairoks service (the "Service") at <a href="https://kairoks.com/">kairoks.com</a>. We are the controller of the personal information described in this policy.</p>
 <p>Kairoks sorts the messages you send it into a calendar and into dashboard categories. This policy explains what information the Service collects, how it is used, who it is disclosed to, and what choices you have.</p>
+<p>Health records are covered by a separate document. If you keep health records in Kairoks — measurements, medications, cycle or pregnancy records, mood, sleep, activity, or food — our <a href="https://kairoks.com/healthpolicy">Consumer Health Data Privacy Notice</a> sets out what we collect, who receives it, the consent we ask for, and how to have it deleted. Where that notice and this policy both address the same health record, that notice governs.</p>
 <p>Questions about this policy can be sent to <a href="mailto:contact@kairoks.com">contact@kairoks.com</a>.</p>
 
 <h2 id="s2">2. Information we gather</h2>
@@ -78,9 +82,10 @@ details a:hover{text-decoration:underline}
 <p><strong>Account information.</strong> We collect the information that you voluntarily provide when you sign up for the Service. The information we collect is your name, email address, and phone number. When you sign in with Google, we also collect the name, email address, and basic profile information that Google returns to us as part of that sign-in.</p>
 <p><strong>Contact details for messaging.</strong> When you use a message channel, we collect the messaging handle or phone number you register, which we use to recognize the messages you send. We collect the messages themselves, including text and any attachments, together with the timestamp at which each message was received.</p>
 <p><strong>Support correspondence.</strong> We collect the messages you send us for support and the contact details you use to send them.</p>
+<p><strong>Information about other people.</strong> A few optional fields let you record someone other than yourself — an emergency contact, or the name of a doctor who prescribed a medication. We collect what you enter there and use it only to show it back to you. Please enter another person's details only where they are content for you to do so.</p>
 <p><strong>Information collected automatically.</strong> Our servers automatically record certain information about how the Service is used ("Log Data"). Log Data consists of sign-in timestamps, IP address, browser and device type, operating system, the pages and features viewed and the time spent on them, and error reports. We use this information to operate, administer, secure, and troubleshoot the Service, and to generate aggregate, non-identifying statistics about how the Service is used.</p>
-<p><strong>Approximate location.</strong> The only location information we hold is what can be inferred from your IP address, which gives a rough, city-level approximation. We use it for security purposes, such as recognizing unusual sign-in activity. We do not request or collect precise location, and we do not request access to your device's microphone, contacts, camera, photos, or stored files. We do not collect biometric information.</p>
-<p><strong>Consumer health data.</strong> Certain records you send are also subject to our Consumer Health Data Privacy Notice, which describes additional rights and choices that apply to them. </p>
+<p><strong>Location.</strong> Our servers record the IP address you connect from, which gives a rough, city-level approximation of where you are. We use it for security purposes, such as recognizing unusual sign-in activity. Separately, the Health page can display the current weather where you are. To do that, your browser asks your permission and, if you allow it, passes your precise coordinates to the page, which sends them to a weather service so it can return the local conditions. We do not store those coordinates, we do not attach them to any of your records, and if you refuse the permission nothing is sent. Our Consumer Health Data Privacy Notice describes this in full. We do not request access to your device's microphone, contacts, camera, photos, or stored files, and we do not collect biometric identifiers used to recognize you.</p>
+<p><strong>Health records.</strong> The records you keep in the Health part of Kairoks, and any record you send us that describes your physical or mental health, are covered by our <a href="https://kairoks.com/healthpolicy">Consumer Health Data Privacy Notice</a>. That notice lists them in full and describes the additional rights that apply to them.</p>
 <p><strong>Information we do not collect.</strong> We do not buy personal information about you from data brokers, and we do not collect information about you from advertising or marketing partners.</p>
 
 <h2 id="s3">3. How we use your information</h2>
@@ -92,6 +97,8 @@ details a:hover{text-decoration:underline}
 <li>To send you messages, such as summaries you have asked for, account notices, and security alerts</li>
 <li>To process your subscription payments and provide receipts</li>
 <li>To operate, maintain, secure, debug, and improve the Service, including monitoring for fraud and abuse</li>
+<li>To look up the nutrition figures for a food you are logging, using public food databases</li>
+<li>To show the current weather on the Health page, where you have allowed your browser to share your location</li>
 <li>To respond to your support requests and to your privacy rights requests</li>
 <li>To comply with legal obligations and to establish, exercise, or defend legal claims</li>
 </ul>
@@ -132,6 +139,9 @@ details a:hover{text-decoration:underline}
 <h3>At your direction</h3>
 <p>Where you connect a third-party account — for example, a Google account — we exchange information with that provider to deliver the feature you asked for. That provider's own privacy policy governs what it does with information on its side.</p>
 
+<h3>Public reference services</h3>
+<p>Two features send a query to an outside reference service so that it can return an answer to you. When you log a food by name, that name is sent to public nutrition databases so calories and nutrients can be filled in for you. When the Health page shows the weather, your coordinates are sent to a weather service, and only if you allowed your browser's location permission. These requests are made by our servers or by your browser at the moment you use the feature; they carry nothing that identifies you as a Kairoks user, and the services receiving them do not hold an account or a record for you. Our Consumer Health Data Privacy Notice names each of these services and explains the consent that applies to them.</p>
+
 <h3>Aggregate statistics</h3>
 <p>We may publish or share aggregate, non-identifying statistics about how the Service is used, such as total message volume. This information cannot be used to identify you, and it never includes the content of your messages or any data obtained from Google APIs.</p>
 
@@ -139,6 +149,7 @@ details a:hover{text-decoration:underline}
 <p>See section 13 (legal disclosures and law enforcement) and section 14 (business transfers).</p>
 
 <h2 id="s7">7. Google API Services and Limited Use</h2>
+<p>Kairoks is an independent service. It is not affiliated with, endorsed by, or sponsored by Google, and it is not a Google product or partner. We use Google's APIs under the same publicly available terms that any developer does.</p>
 <p>Signing in with Google, and connecting your calendar, are optional. If you use them, the following applies.</p>
 
 <h3>What we request</h3>
@@ -149,7 +160,7 @@ details a:hover{text-decoration:underline}
 
 <h3>What we write to your calendar</h3>
 <p>When a message you send is classified as scheduling information, or as a record you have asked to track over time, Kairoks creates a corresponding event in the Google Calendar you connected. The content of that event is drawn from your message, so it may include personal details — for example, a recorded measurement or a reminder relating to your own records.</p>
-<p>These events are written to your own calendar under your own Google account. Kairoks does not create events in anyone else's calendar and does not change the sharing settings of any calendar. Once an event exists in your calendar, it is held by Google under your Google account and is governed by Google's own privacy policy, and it is visible to anyone you have granted access to that calendar. If you do not want a particular category of information written to your calendar, turn that category off in your Kairoks settings before sending it, or send it through a channel you have not connected to a calendar.</p>
+<p>These events are written to your own calendar under your own Google account. Kairoks does not create events in anyone else's calendar and does not change the sharing settings of any calendar. Once an event exists in your calendar, it is held by Google under your Google account and is governed by Google's own privacy policy, and it is visible to anyone you have granted access to that calendar. Whether a record reaches your calendar depends on how you entered it. Entries you type into the Health pages are written to your calendar only when you press "Add to Calendar" on that entry; if you do not press it, nothing is sent. Records you send us in a message are added to your calendar automatically, so if you would rather a particular record stayed out of your calendar, enter it in the Health pages instead of sending it in a message. You can also stop calendar syncing altogether by disconnecting your Google account, as described below.</p>
 
 <h3>Limited Use</h3>
 <p>Kairoks' use and transfer to any other app of information received from Google APIs will adhere to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements. Specifically, Google user data obtained through these scopes is:</p>
@@ -181,12 +192,12 @@ details a:hover{text-decoration:underline}
 </ul>
 
 <h2 id="s10">10. International data transfers</h2>
-<p>Our servers and our service providers' infrastructure are located in the United States. If you use the Service from outside the United States, your personal information will be transferred to, stored in, and processed in the United States, where the privacy laws may not be as protective as those in your jurisdiction.</p>
+<p>Our servers, and the infrastructure of the providers who run the Service on our behalf, are located in the United States. If you use the Service from outside the United States, your personal information will be transferred to, stored in, and processed in the United States, where the privacy laws may not be as protective as those in your jurisdiction. Two features send a request outside the United States: looking up a food you are logging queries a public food database operated from France, and the weather display on the Health page queries a weather service operated from Germany. Neither request carries information that identifies you, and neither is stored outside the United States. Our Consumer Health Data Privacy Notice describes both in detail.</p>
 <p>If you are a resident of the European Economic Area, the United Kingdom, or Switzerland, we rely on the European Commission's Standard Contractual Clauses, together with the UK International Data Transfer Addendum where applicable, for transfers between us and our third-party service providers. These clauses require all recipients to protect personal information originating from the EEA or the UK in accordance with European data protection law. A copy of the relevant clauses is available on request at <a href="mailto:contact@kairoks.com">contact@kairoks.com</a>.</p>
 
 <h2 id="s11">11. How long we keep your information</h2>
 <p>Your messages are retained for as long as your account is active, because accumulated history is the point of the Service. You may delete individual records at any time within the Service, and you can access and modify the personal information associated with your account through your account settings.</p>
-<p>If you ask us to delete your account, we delete your account information and message content from our active systems within 30 days. Copies may persist in encrypted backups until they are overwritten in the normal backup rotation; during that period the data is isolated from any further processing.</p>
+<p>If you ask us to delete your account, we delete your account information and message content within 30 days, including the earlier versions of the files those records are held in. The deletion is permanent: we do not retain an archived copy, and we cannot restore your history afterwards even at your request. Please export anything you wish to keep before you ask. You may also ask us to delete part of your data rather than all of it, and we complete those requests within the same 30 days. Health records are covered by our <a href="https://kairoks.com/healthpolicy">Consumer Health Data Privacy Notice</a>, which describes the same process in more detail.</p>
 <p>We retain a limited set of records beyond deletion only where the law requires it — for example, transaction and tax records associated with payments, and records needed to establish, exercise, or defend legal claims. These records do not include the content of your messages.</p>
 <p>Events that Kairoks created in your own calendar are stored by your calendar provider under your own account, not by us. Deleting your Kairoks account, or disconnecting your Google account, does not delete them, because after disconnection we no longer have the access needed to remove them. You can delete them yourself in your calendar at any time. If you would like them removed before you disconnect, ask us at <a href="mailto:contact@kairoks.com">contact@kairoks.com</a> while your account is still connected.</p>
 
@@ -196,7 +207,7 @@ details a:hover{text-decoration:underline}
 <li>Data is encrypted in transit and at rest, including your messages and any attachments.</li>
 <li>Access to production systems and to user data is restricted to those who need it to operate the Service, is granted through identity and access management controls, and is logged.</li>
 <li>Administrative access requires multi-factor authentication.</li>
-<li>Backups are encrypted and access-controlled.</li>
+<li>Stored copies of your data are encrypted and access-controlled.</li>
 </ul>
 <p>Please be aware, however, that no method of transmitting information over the internet and no method of storing information is completely secure. Accordingly, we cannot guarantee the absolute security of any information, and you send information to the Service at your own risk. If we become aware of a breach affecting your personal information, we will notify you and the relevant authorities where applicable law requires it, within the timeframes that law sets.</p>
 
@@ -215,7 +226,7 @@ details a:hover{text-decoration:underline}
 <p>If Kairoks is involved in a merger, acquisition, financing, reorganization, bankruptcy, or sale of all or part of its assets, your personal information may be transferred to the successor or acquiring entity as part of that transaction, or disclosed to a prospective party under a confidentiality agreement during diligence. Any such disclosure will comply with applicable law. Any successor will remain bound by this policy with respect to information transferred to it, unless and until you are notified of and agree to a different policy. Where the transferred information includes Google user data, the transfer will comply with the Limited Use requirements described in section 7. If a transfer occurs, we will notify you by email and in the Service before your information becomes subject to a different policy.</p>
 
 <h2 id="s15">15. Links to other sites</h2>
-<p>The Service may contain links to other websites and services. Any information you provide on or to a third-party website or service is provided directly to the owner of that website or service and is subject to that party's privacy policy. This Privacy Policy does not apply to those websites or services, and we are not responsible for their content, privacy, or security practices. We recommend that you review the privacy policies of any other websites and services you access. If you send records covered by our Consumer Health Data Privacy Notice, additional rights and request procedures apply to those records, as described in that notice. </p>
+<p>The Service may contain links to other websites and services. Any information you provide on or to a third-party website or service is provided directly to the owner of that website or service and is subject to that party's privacy policy. This Privacy Policy does not apply to those websites or services, and we are not responsible for their content, privacy, or security practices. We recommend that you review the privacy policies of any other websites and services you access.</p>
 
 <h2 id="s16">16. Your privacy rights</h2>
 <p>Depending on where you live, you may have some or all of the following rights over your personal information:</p>
@@ -234,13 +245,14 @@ details a:hover{text-decoration:underline}
 <h3>How to exercise them</h3>
 <p>Email <a href="mailto:contact@kairoks.com">contact@kairoks.com</a> from the address on your account, stating your name and what you are asking for — for example "Access," "Correct," "Export," or "Delete." You can also access and modify much of your information directly in your account settings. We will verify your identity before acting on a request, using information already associated with your account; if we cannot verify you from that, we may ask for more information, used only for verification.</p>
 <p>We respond within 45 days of receiving a verifiable request, and may extend by a further 45 days where the request is complex, in which case we will tell you within the first 45 days. For requests under EEA or UK law, we respond within one month, extendable by two further months for complex requests.</p>
+<p>Requests to delete health records are completed within 30 days and that period is not extended. Our <a href="https://kairoks.com/healthpolicy">Consumer Health Data Privacy Notice</a> explains what a health deletion covers.</p>
 <p>You may use an authorized agent to make a request on your behalf. We may ask the agent for proof of authorization and may ask you to verify your identity directly.</p>
 
 <h3>Withdrawing your consent</h3>
 <p>Where we rely on your consent to process your personal information, you may withdraw that consent at any time by contacting us or by disconnecting the relevant feature in your account settings. Withdrawal does not affect the lawfulness of processing carried out before you withdrew it, nor does it affect processing that rests on a legal basis other than consent.</p>
 
 <h3>Appeals and complaints</h3>
-<p>If we decline your request, you may appeal by replying to our decision with the word "Appeal." We will respond within 45 days with our decision and reasons. If you are still not satisfied, you may complain to your state attorney general. If you are in the EEA or the UK, you may complain to your national data protection authority; in Switzerland, to the Federal Data Protection and Information Commissioner.</p>
+<p>If we decline your request, you may appeal by replying to our decision with the word "Appeal." We will respond within 45 days with our decision and reasons. If you are still not satisfied, you may complain to your state attorney general. Washington residents can file at <a href="https://www.atg.wa.gov/file-complaint">atg.wa.gov/file-complaint</a> and Nevada residents at <a href="https://ag.nv.gov/Complaints/File_Complaint/">ag.nv.gov/Complaints/File_Complaint</a>. If you are in the EEA or the UK, you may complain to your national data protection authority; in Switzerland, to the Federal Data Protection and Information Commissioner.</p>
 
 <h3>California "Shine the Light"</h3>
 <p>California residents may ask whether we disclosed personal information to third parties for those third parties' direct marketing purposes in the preceding calendar year. We do not make such disclosures.</p>
@@ -259,5 +271,22 @@ details a:hover{text-decoration:underline}
 
 <div class="footer">© 2026 Kairoks · All rights reserved.</div>
 </div>
+<script>
+(function(){
+  var b=document.getElementById('backlink');
+  if(!b){return;}
+  var internal=false;
+  try{
+    var r=document.referrer;
+    if(r){
+      var u=new URL(r);
+      internal=(u.origin===location.origin&&u.pathname!==location.pathname);
+    }
+  }catch(e){internal=false;}
+  if(internal&&history.length>1){
+    b.addEventListener('click',function(e){e.preventDefault();history.back();});
+  }
+})();
+</script>
 </body>
 </html>
